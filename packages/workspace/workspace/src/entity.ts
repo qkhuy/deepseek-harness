@@ -9,6 +9,7 @@
  */
 
 import { stat } from 'node:fs/promises'
+import type { PrincipalId } from '@deepseek-ai/dsh-principal'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { WorkspaceRecord } from './spec.ts'
@@ -96,6 +97,10 @@ export class WorkspaceEntity implements Workspace {
 
   get updatedAt(): string {
     return this.record.updatedAt
+  }
+
+  get owner(): PrincipalId | undefined {
+    return this.record.owner
   }
 
   get sessionIds(): readonly SessionId[] {

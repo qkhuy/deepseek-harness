@@ -6,6 +6,7 @@
  */
 
 import type { Branded } from '@deepseek-ai/dsh-brand'
+import type { PrincipalId } from '@deepseek-ai/dsh-principal'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-typert-protocol'
 
@@ -41,6 +42,14 @@ export interface Workspace {
 
   /** Display title. Defaults to `basename(path)` at create; duplicates are allowed. */
   readonly title: string
+
+  /**
+   * The principal that created this workspace, stamped at create where a
+   * principal seam was mounted and a user was bound. Absent on a workspace
+   * created with no signed-in user — see the registry's visibility rule for
+   * what that means for who can see it.
+   */
+  readonly owner: PrincipalId | undefined
 
   /** ISO-8601 creation instant, stamped at create and never rewritten. */
   readonly createdAt: string

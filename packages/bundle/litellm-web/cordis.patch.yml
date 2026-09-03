@@ -1,0 +1,51 @@
+# Sign-in and per-user model routing over the dsh-web-app surface.
+#
+# Mounting this layer changes the Web surface from one operator's tool into a
+# multi-user one. Three things follow from the single row that provides
+# `principal`, and they are the whole point of the layer:
+#
+#   * `/api` stops accepting the launch-token browser session and starts
+#     accepting a LiteLLM virtual key signed in at `/auth/litellm`;
+#   * the workspace registry shows each signed-in user only their own
+#     workspaces, and stamps new ones with their identity;
+#   * every model request carries the requesting user's own key, so the proxy
+#     applies their model access and budget and bills the spend to them.
+#
+# `LITELLM_BASE_URL` is read from the launching environment because the proxy
+# address is a deployment fact, not a user preference; a deployment that
+# prefers to pin it edits these two rows.
+
+- insert:
+    # The principal provider. It must bind before the Connection carrier reads
+    # `ctx.principal`, which the row order below guarantees: Loader activates
+    # `webServer` first, this row second, and the `/api` route is registered by
+    # the connection row already present in the web-app layer.
+    - id: litellm-auth
+      name: '@deepseek-ai/dsh-litellm-auth'
+      inject: [webServer]
+      config:
+        baseURL: !!js process.env.LITELLM_BASE_URL
+        # Serving over HTTPS? Set DSH_LITELLM_SECURE_COOKIE=1. Leaving it set on
+        # a plain-HTTP deployment makes every sign-in silently fail to stick,
+        # because the browser refuses to store a `Secure` cookie there.
+        secureCookie: !!js process.env.DSH_LITELLM_SECURE_COOKIE === '1'
+        requireLogin: true
+
+    # The provider route. Its `apiKeyEnv` reference serves only requests no
+    # signed-in user made — a scheduled job, a CLI run in the same home. A
+    # signed-in user's key always wins, so nothing here can make one user's
+    # request bill to another's account.
+    - id: llm-litellm
+      name: '@deepseek-ai/dsh-llm-litellm'
+      config:
+        baseURL: !!js process.env.LITELLM_BASE_URL
+        apiKeyEnv: LITELLM_API_KEY
+
+# New sessions default to a model the proxy serves rather than to the direct
+# DeepSeek route, which a LiteLLM deployment usually does not configure a key
+# for. `DSH_LITELLM_MODEL` names the proxy's public alias, which is deployment
+# vocabulary: the proxy operator chose it, and no default here could guess it.
+- id: agent-default-model
+  config:
+    provider: litellm
+    model: !!js process.env.DSH_LITELLM_MODEL ?? 'gpt-4o'

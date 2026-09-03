@@ -11,6 +11,7 @@ import { clientRequestSchema } from './rpc-schema.ts'
 import { bridge, type FetchHandler } from './http-bridge.ts'
 import { isTrustedApiRequest } from './api-request-trust.ts'
 import { API_PATH } from './api-path.ts'
+import type {} from '@deepseek-ai/dsh-principal'
 import type { BrowserAuth } from './browser-auth.ts'
 import type {
   ConnectionIndexRequest,
@@ -92,15 +93,44 @@ export class HostConnectionService extends Service implements HostConnectionHand
     }
   }
 
-  /** Apply the configured Host/Origin fence, then browser authentication. */
+  /**
+   * Apply the configured Host/Origin fence, then whichever authentication this
+   * deployment runs.
+   *
+   * A mounted principal seam REPLACES the launch-token browser session rather
+   * than layering over it. The two answer different questions — "is this the
+   * browser this process opened" and "which user is this" — and a multi-user
+   * deployment cannot distribute a launch token, so requiring both would make
+   * every user but the operator unreachable.
+   */
   requestRejection(request: ConnectionTrustRequest): ConnectionRequestRejection {
     if (!isTrustedApiRequest(request, this.trustedHosts)) return 403
+    const principals = this.ctx.get('principal')
+    if (principals !== undefined) {
+      return principals.authenticate(request) !== undefined || !principals.required ? undefined : 401
+    }
     return this.browserAuth.isAuthenticated(request) ? undefined : 401
   }
 
-  /** Authenticate an index request through the process-token exchange or cookie. */
+  /**
+   * Authenticate an index request through the process-token exchange or cookie.
+   *
+   * Under a mounted principal seam the index is served unauthenticated: the
+   * sign-in page is a document the browser must be able to reach before it has
+   * any identity, and every authority the page could exercise lives behind
+   * `/api`, which {@link requestRejection} still gates.
+   */
   authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean {
+    if (this.ctx.get('principal') !== undefined) return true
     return this.browserAuth.authorizeIndex(request, response)
+  }
+
+  /** Bind the request's user to its handling; see the handle interface for the contract. */
+  runAuthenticated<T>(request: ConnectionTrustRequest, handle: () => T): T {
+    const principals = this.ctx.get('principal')
+    if (principals === undefined) return handle()
+    const principal = principals.authenticate(request)
+    return principal === undefined ? handle() : principals.run(principal, handle)
   }
 
   /** Add this process's launch token to the clean application URL. */
@@ -166,7 +196,9 @@ export class HostConnectionService extends Service implements HostConnectionHand
           res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
           return
         }
-        await bridge(req, res, fetchHandler)
+        await this.runAuthenticated(req, async () => {
+          await bridge(req, res, fetchHandler)
+        })
       },
     }
     return owner.effect(
