@@ -22,6 +22,8 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { LiteLlmClient, LiteLlmRequestError } from '@deepseek-ai/dsh-litellm-client'
 import type { LiteLlmKeyIdentity } from '@deepseek-ai/dsh-litellm-client'
+import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import type { LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { PrincipalService } from '@deepseek-ai/dsh-principal'
 import type { Principal, PrincipalRequest } from '@deepseek-ai/dsh-principal'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -50,6 +52,8 @@ export const LOGOUT_PATH = '/auth/litellm/logout'
 export const SESSION_PATH = '/auth/litellm/session'
 
 const MINUTE_MS = 60 * 1000
+/** Environment name carrying the proxy endpoint; a deployment fact, not a user preference. */
+export const BASE_URL_ENV = 'LITELLM_BASE_URL'
 
 /**
  * Plugin config. Every deployment-varying choice is here: the proxy to
@@ -58,11 +62,13 @@ const MINUTE_MS = 60 * 1000
  */
 export interface Config {
   /**
-   * LiteLLM proxy URL, with or without a `/v1` suffix. Required: there is no
-   * default proxy to authenticate against, and guessing one would send a
-   * user's key somewhere they did not name.
+   * LiteLLM proxy URL, with or without a `/v1` suffix. Omitted here it falls
+   * back to `$LITELLM_BASE_URL` from a trusted environment layer; a mount that
+   * resolves to neither fails at load, because there is no default proxy to
+   * authenticate against and guessing one would send a user's key somewhere
+   * they did not name.
    */
-  baseURL: string
+  baseURL?: string
   /** Session lifetime in minutes, from sign-in. @default 720 */
   sessionTtlMinutes?: number
   /** Timeout in milliseconds for each key-verification call to the proxy. @default 15000 */
@@ -89,7 +95,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  baseURL: z.string().required(),
+  baseURL: z.string(),
   sessionTtlMinutes: z.natural().min(1).default(720),
   verifyTimeoutMs: z.natural().min(1).default(15_000),
   cookieName: z.string().default('dsh-litellm-session'),
@@ -191,14 +197,36 @@ function signInRefusal(error: unknown): { status: number; message: string } {
 }
 
 /**
+ * Resolve the proxy endpoint: the configured value, else `$LITELLM_BASE_URL`
+ * from a trusted environment layer. The one explicit resolve step from raw
+ * config to a usable endpoint.
+ * @param config - raw plugin config.
+ * @param environment - this run's environment layers, or `undefined` outside the product CLI.
+ * @returns the resolved endpoint.
+ * @throws Error when neither source names one.
+ */
+export function resolveBaseUrl(config: Config, environment?: LaunchEnvironmentSnapshot): string {
+  const baseURL = config.baseURL ?? environment?.get(BASE_URL_ENV)?.value
+  if (baseURL === undefined || baseURL.trim().length === 0) {
+    throw new Error(
+      'litellm-auth: no proxy endpoint to authenticate against; set this row\'s baseURL, or export'
+      + ` ${BASE_URL_ENV} in the launching environment`,
+    )
+  }
+  return baseURL
+}
+
+/**
  * Mount LiteLLM sign-in.
  * @param ctx - the plugin Context; the routes and the principal service bind to it.
  * @param config - validated plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
-  const resolved = config as Required<Omit<Config, 'headers'>> & { headers: Record<string, string> }
+  const resolved = config as Required<Omit<Config, 'headers' | 'baseURL'>>
+    & { baseURL?: string; headers: Record<string, string> }
+  const baseURL = resolveBaseUrl(config, launchEnvironmentOf(ctx))
   const client = internals.createClient({
-    baseURL: resolved.baseURL,
+    baseURL,
     timeoutMs: resolved.verifyTimeoutMs,
     headers: resolved.headers,
   })
@@ -215,8 +243,12 @@ export function apply(ctx: Context, config: Config): void {
   // fiber, so construction is the registration.
   const service = new LiteLlmPrincipals(ctx, sessions, resolved.cookieName, resolved.requireLogin)
 
-  const requestedNext = (req: IncomingMessage): string =>
-    safeReturnPath(new URL(req.url ?? LOGIN_PATH, 'http://dsh.invalid').searchParams.get('next') ?? undefined)
+  const requestedNext = (req: IncomingMessage): string => {
+    /* v8 ignore next -- `?? LOGIN_PATH` arm: node:http always sets url on server
+    requests; the field is only optional on the client-side IncomingMessage type */
+    const url = new URL(req.url ?? LOGIN_PATH, 'http://dsh.invalid')
+    return safeReturnPath(url.searchParams.get('next') ?? undefined)
+  }
 
   const routes: Routes = {
     page: (req, res) => {
@@ -230,7 +262,13 @@ export function apply(ctx: Context, config: Config): void {
         submitted = await readCredentials(req, style)
       } catch (error) {
         const rejection = error as BodyRejected
+        // Every reachable readCredentials() failure is a BodyRejected; the
+        // non-BodyRejected arms below defend a raw stream failure (the client
+        // disconnecting mid-body), which closes the connection before any
+        // response could reach it, so it has no client-observable test.
+        /* v8 ignore next -- see above */
         const status = error instanceof BodyRejected ? rejection.status : 400
+        /* v8 ignore next -- see above */
         const message = error instanceof BodyRejected ? rejection.message : 'sign-in request could not be read'
         if (style === 'json') writeJson(res, status, { error: message })
         else writeHtml(res, status, renderLoginPage({ action: LOGIN_PATH, next: '/', error: message }))
@@ -290,6 +328,8 @@ export function apply(ctx: Context, config: Config): void {
     allowed: readonly string[],
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>,
   ) => async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    /* v8 ignore next -- `?? ''` arm: node:http always sets method on server
+    requests; the field is only optional on the client-side IncomingMessage type */
     if (!allowed.includes(req.method ?? '')) {
       res.writeHead(405, { 'allow': allowed.join(', '), 'cache-control': 'no-store' })
       res.end()

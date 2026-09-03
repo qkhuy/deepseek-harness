@@ -11,9 +11,10 @@
 #   * every model request carries the requesting user's own key, so the proxy
 #     applies their model access and budget and bills the spend to them.
 #
-# `LITELLM_BASE_URL` is read from the launching environment because the proxy
-# address is a deployment fact, not a user preference; a deployment that
-# prefers to pin it edits these two rows.
+# Neither row inlines the proxy endpoint or a credential. Both resolve
+# $LITELLM_BASE_URL through the launch-environment snapshot, and the route
+# resolves its fallback key through the credential seam, so a deployment
+# changes either without editing this composition.
 
 - insert:
     # The principal provider. It must bind before the Connection carrier reads
@@ -24,7 +25,6 @@
       name: '@deepseek-ai/dsh-litellm-auth'
       inject: [webServer]
       config:
-        baseURL: !!js process.env.LITELLM_BASE_URL
         # Serving over HTTPS? Set DSH_LITELLM_SECURE_COOKIE=1. Leaving it set on
         # a plain-HTTP deployment makes every sign-in silently fail to stick,
         # because the browser refuses to store a `Secure` cookie there.
@@ -38,7 +38,6 @@
     - id: llm-litellm
       name: '@deepseek-ai/dsh-llm-litellm'
       config:
-        baseURL: !!js process.env.LITELLM_BASE_URL
         apiKeyEnv: LITELLM_API_KEY
 
 # New sessions default to a model the proxy serves rather than to the direct

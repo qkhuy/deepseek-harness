@@ -24,6 +24,8 @@ import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { LiteLlmClient, LiteLlmRequestError } from '@deepseek-ai/dsh-litellm-client'
 import type { LiteLlmModel } from '@deepseek-ai/dsh-litellm-client'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
+import type { LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import type {} from '@deepseek-ai/dsh-principal'
 import type {} from '@deepseek-ai/dsh-settings'
 import { LiteLlmAdapter } from './adapter.ts'
@@ -46,14 +48,21 @@ export const PROVIDER = 'litellm'
 export const SETTINGS_NS = 'llm-litellm'
 /** Credential reference used when no signed-in user owns the request. */
 const DEFAULT_API_KEY_ENV = 'LITELLM_API_KEY'
+/** Environment name carrying the proxy endpoint; a deployment fact, not a user preference. */
+export const BASE_URL_ENV = 'LITELLM_BASE_URL'
 
 /**
  * Plugin config. `apiKeyEnv` is deliberately not the primary credential: it
  * serves requests no principal made, and a signed-in user's key always wins.
  */
 export interface Config {
-  /** LiteLLM proxy URL, with or without a `/v1` suffix. Required. */
-  baseURL: string
+  /**
+   * LiteLLM proxy URL, with or without a `/v1` suffix. Omitted here it falls
+   * back to `$LITELLM_BASE_URL` from a trusted environment layer; a mount that
+   * resolves to neither fails at load, because there is no default proxy and
+   * guessing one would send a user's key somewhere they did not name.
+   */
+  baseURL?: string
   /**
    * Credential reference for requests no signed-in user made. Resolved per
    * request through the credential seam, so no secret enters configuration.
@@ -75,7 +84,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  baseURL: z.string().required(),
+  baseURL: z.string(),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   timeoutMs: z.natural().min(1).default(600_000),
   catalogTimeoutMs: z.natural().min(1).default(15_000),
@@ -136,17 +145,45 @@ class CatalogCache {
 }
 
 /**
+ * Resolve the proxy endpoint: the configured value, else `$LITELLM_BASE_URL`
+ * from a trusted environment layer. The one explicit resolve step from raw
+ * config to a usable endpoint, so both the composition entry at load (fail
+ * loud) and a future settings snapshot re-judge it the same way.
+ * @param config - raw plugin config.
+ * @param environment - this run's environment layers, or `undefined` outside the product CLI.
+ * @returns the resolved endpoint.
+ * @throws LlmError with code `INVALID_CONFIG` when neither source names one.
+ */
+export function resolveBaseUrl(config: Config, environment?: LaunchEnvironmentSnapshot): string {
+  const baseURL = config.baseURL ?? environment?.get(BASE_URL_ENV)?.value
+  if (baseURL === undefined || baseURL.trim().length === 0) {
+    throw new LlmError(
+      `llm-litellm: no proxy endpoint for provider route "${PROVIDER}"; set this row's baseURL, or export`
+      + ` ${BASE_URL_ENV} in the launching environment`,
+      'INVALID_CONFIG',
+    )
+  }
+  return baseURL
+}
+
+/** Test hook for the proxy management client this route reads catalogs through; production never mutates it. */
+export const internals: {
+  createClient: (options: ConstructorParameters<typeof LiteLlmClient>[0]) => LiteLlmClient
+} = { createClient: options => new LiteLlmClient(options) }
+
+/**
  * Mount the LiteLLM provider route.
  * @param ctx - the plugin Context; the route registration binds to it.
  * @param config - validated plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
-  const resolved = config as Required<Omit<Config, 'headers' | 'retryPolicy'>>
-    & { headers: Record<string, string>; retryPolicy?: RetryPolicyConfig }
+  const resolved = config as Required<Omit<Config, 'headers' | 'retryPolicy' | 'baseURL'>>
+    & { baseURL?: string; headers: Record<string, string>; retryPolicy?: RetryPolicyConfig }
+  const baseURL = resolveBaseUrl(config, launchEnvironmentOf(ctx))
   const ref = credentialRef(resolved.apiKeyEnv)
   const catalogs = new CatalogCache(resolved.catalogTtlSeconds * 1000)
-  const client = new LiteLlmClient({
-    baseURL: resolved.baseURL,
+  const client = internals.createClient({
+    baseURL,
     timeoutMs: resolved.catalogTimeoutMs,
     headers: resolved.headers,
   })
@@ -156,7 +193,7 @@ export function apply(ctx: Context, config: Config): void {
   }, 'llm-litellm: catalog cache')
 
   const connection = (): LiteLlmConnection => ({
-    baseURL: resolved.baseURL,
+    baseURL,
     timeoutMs: resolved.timeoutMs,
     headers: resolved.headers,
     defaultContextWindow: resolved.defaultContextWindow,
@@ -182,14 +219,23 @@ export function apply(ctx: Context, config: Config): void {
 
   const listCatalog = async (): Promise<readonly LiteLlmModel[]> => {
     const principal = ctx.get('principal')?.current()
-    const key = await resolveApiKey()
+    let key: string
+    try {
+      key = await resolveApiKey()
+    } catch (error) {
+      // The seam documents the catalog as advisory, so a model selector asking
+      // before anyone has signed in must see an empty list, not a failure. The
+      // same absence still refuses a real request, where it is actionable.
+      if (!(error instanceof LlmError) || error.failure.code !== 'MISSING_CREDENTIAL') throw error
+      return []
+    }
     try {
       return await catalogs.read(principal?.id ?? 'anonymous', () => client.listModels(key))
     } catch (error) {
       if (!(error instanceof LiteLlmRequestError)) throw error
-      // The catalog is advisory: a proxy that will not list models can still
-      // serve the model a caller named, so a failed listing degrades to an
-      // empty catalog with a diagnostic rather than failing model selection.
+      // A proxy that will not list models can still serve the model a caller
+      // named, so a failed listing degrades to an empty catalog with a
+      // diagnostic rather than failing model selection.
       ctx.logger.warn('llm-litellm: the proxy would not list models (%s)', error.failure.code)
       return []
     }

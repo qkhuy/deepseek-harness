@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { createMessage, LlmError } from '@deepseek-ai/dsh-llm'
+import { createMessage, LlmError, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { LiteLlmAdapter } from '../src/index.ts'
 import type { LiteLlmConnection } from '../src/index.ts'
@@ -26,7 +26,7 @@ const request = (overrides: Partial<GenerateOptions> = {}): GenerateOptions => (
 })
 
 /** A proxy answering one scripted SSE body, recording what each request carried. */
-function proxy(events: string[], status = 200): {
+function proxy(events: string[], status = 200, errorHeaders?: Record<string, string>): {
   fetch: typeof globalThis.fetch
   calls: Array<{ authorization: string | null; body: Record<string, unknown>; url: string }>
 } {
@@ -38,7 +38,10 @@ function proxy(events: string[], status = 200): {
       body: JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<string, unknown>,
     })
     if (status !== 200) {
-      return Promise.resolve(new Response(JSON.stringify({ error: { message: 'refused' } }), { status }))
+      return Promise.resolve(new Response(
+        JSON.stringify({ error: { message: 'refused' } }),
+        { status, ...errorHeaders === undefined ? {} : { headers: errorHeaders } },
+      ))
     }
     return Promise.resolve(new Response(
       new ReadableStream<Uint8Array>({
@@ -51,6 +54,11 @@ function proxy(events: string[], status = 200): {
     ))
   }
   return { fetch: fetchImpl, calls }
+}
+
+/** A proxy answering `200 OK` with a null body, an upstream misbehavior. */
+function proxyWithNoBody(): typeof globalThis.fetch {
+  return () => Promise.resolve(new Response(null, { status: 200 }))
 }
 
 const collect = async (stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> => {
@@ -103,6 +111,34 @@ describe('the key on the wire', () => {
     await collect(adapter(scripted).stream(request()))
     expect(scripted.calls[0]?.url).toBe('https://proxy.example/v1/chat/completions')
   })
+
+  it('uses the global fetch when no override is given', async () => {
+    const realFetch = globalThis.fetch
+    let called = false
+    globalThis.fetch = (..._args: Parameters<typeof fetch>) => {
+      called = true
+      return Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
+            controller.close()
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ))
+    }
+    try {
+      const bare = new LiteLlmAdapter({
+        connection: () => connection,
+        resolveApiKey: () => Promise.resolve('sk-x'),
+        listCatalog: () => Promise.resolve([]),
+      })
+      await collect(bare.stream(request()))
+      expect(called).toBe(true)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
 })
 
 describe('the request body', () => {
@@ -120,6 +156,22 @@ describe('the request body', () => {
     await collect(adapter(bare).stream(request()))
     expect(Object.keys(bare.calls[0]?.body ?? {})).not.toContain('temperature')
     expect(Object.keys(bare.calls[0]?.body ?? {})).not.toContain('stop')
+  })
+
+  it('omits stop when the request declares an empty list', async () => {
+    const scripted = proxy(textStream)
+    await collect(adapter(scripted).stream(request({ stop: [] })))
+    expect(Object.keys(scripted.calls[0]?.body ?? {})).not.toContain('stop')
+  })
+
+  it('projects offered tool schemas onto the OpenAI function form', async () => {
+    const scripted = proxy(textStream)
+    await collect(adapter(scripted).stream(request({
+      tools: [{ name: 'read', description: 'read a file', parameters: { type: 'object' } }],
+    })))
+    expect(scripted.calls[0]?.body.tools).toEqual([
+      { type: 'function', function: { name: 'read', description: 'read a file', parameters: { type: 'object' } } },
+    ])
   })
 })
 
@@ -181,6 +233,76 @@ describe('the streamed response', () => {
     await expect(collect(adapter(proxy(['{oops'])).stream(request())))
       .rejects.toMatchObject({ code: 'PROTOCOL' })
   })
+
+  it('refuses a streaming response the proxy answered with no body', async () => {
+    await expect(collect(adapter({ fetch: proxyWithNoBody(), calls: [] }).stream(request())))
+      .rejects.toMatchObject({ code: 'STREAM_CLOSED' })
+  })
+
+  it('skips a stream event whose JSON is not an object', async () => {
+    const chunks = await collect(adapter(proxy([
+      '42',
+      JSON.stringify({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }),
+      '[DONE]',
+    ])).stream(request()))
+    expect(chunks.filter(chunk => chunk.type === 'text-delta')).toEqual([{ type: 'text-delta', index: 0, text: 'a' }])
+  })
+
+  it('classifies an in-stream error with no numeric code as a server failure', async () => {
+    await expect(collect(adapter(proxy([
+      JSON.stringify({ error: { message: 'upstream exploded' } }),
+      '[DONE]',
+    ])).stream(request()))).rejects.toMatchObject({ code: 'SERVER' })
+  })
+
+  it('tolerates a final chunk reporting usage with no choices field at all', async () => {
+    const chunks = await collect(adapter(proxy([
+      JSON.stringify({ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }),
+      JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      '[DONE]',
+    ])).stream(request()))
+    expect(chunks.find(chunk => chunk.type === 'usage')).toMatchObject({ type: 'usage' })
+  })
+
+  it('ignores a choice entry with no delta field', async () => {
+    const chunks = await collect(adapter(proxy([
+      JSON.stringify({ choices: [{ finish_reason: 'stop' }] }),
+      '[DONE]',
+    ])).stream(request()))
+    expect(chunks).toEqual([{ type: 'finish', reason: { kind: 'stop' } }])
+  })
+
+  it('defaults a tool-call delta with no wire index or arguments', async () => {
+    const chunks = await collect(adapter(proxy([
+      JSON.stringify({ choices: [{ delta: { tool_calls: [{ id: 'call_1', function: { name: 'read' } }] }, finish_reason: 'tool_calls' }] }),
+      '[DONE]',
+    ])).stream(request()))
+    expect(chunks.find(chunk => chunk.type === 'block-end')).toEqual({
+      type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call_1', name: 'read', arguments: '' },
+    })
+  })
+
+  it('ends an in-stream failure as aborted when the caller signal is already aborted', async () => {
+    const controller = new AbortController()
+    const fetchImpl: typeof globalThis.fetch = () => {
+      controller.abort()
+      return Promise.resolve(new Response(
+        new ReadableStream<Uint8Array>({
+          start(sseController) {
+            sseController.enqueue(new TextEncoder().encode('data: {oops\n\n'))
+            sseController.close()
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ))
+    }
+    const chunks = await collect(adapter({ fetch: fetchImpl, calls: [] })
+      .stream(request({ signal: controller.signal })))
+    expect(chunks).toEqual([{
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { message: 'request aborted', code: 'ABORTED' } },
+    }])
+  })
 })
 
 describe('proxy refusals', () => {
@@ -192,6 +314,11 @@ describe('proxy refusals', () => {
   it('classifies an exhausted allowance as RATE_LIMIT', async () => {
     await expect(collect(adapter(proxy([], 429)).stream(request())))
       .rejects.toMatchObject({ code: 'RATE_LIMIT' })
+  })
+
+  it('carries the proxy-requested retry delay', async () => {
+    await expect(collect(adapter(proxy([], 429, { 'retry-after': '2' })).stream(request())))
+      .rejects.toMatchObject({ code: 'RATE_LIMIT', failure: { providerRetryAfterMs: 2000 } })
   })
 
   it('reports an unreachable proxy as TRANSPORT', async () => {
@@ -219,6 +346,28 @@ describe('proxy refusals', () => {
       type: 'finish',
       reason: { kind: 'aborted', failure: { message: 'request aborted', code: 'ABORTED' } },
     }])
+  })
+})
+
+describe('providerRetryPolicy', () => {
+  it('returns the resolved policy the adapter was constructed with', () => {
+    const policy = resolveRetryPolicy({ mode: 'normal', maxRetries: 3 }, 'test')
+    const withPolicy = new LiteLlmAdapter({
+      connection: () => connection,
+      resolveApiKey: () => Promise.resolve('sk-x'),
+      listCatalog: () => Promise.resolve([]),
+      retryPolicy: policy,
+    })
+    expect(withPolicy.providerRetryPolicy('litellm')).toBe(policy)
+  })
+
+  it('answers undefined when none was configured', () => {
+    const withoutPolicy = new LiteLlmAdapter({
+      connection: () => connection,
+      resolveApiKey: () => Promise.resolve('sk-x'),
+      listCatalog: () => Promise.resolve([]),
+    })
+    expect(withoutPolicy.providerRetryPolicy('litellm')).toBeUndefined()
   })
 })
 

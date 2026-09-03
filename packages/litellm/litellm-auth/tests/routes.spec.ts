@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import { LiteLlmClient } from '@deepseek-ai/dsh-litellm-client'
+import { LiteLlmClient, LiteLlmRequestError } from '@deepseek-ai/dsh-litellm-client'
 import { LOGIN_PATH, LOGOUT_PATH, SESSION_PATH, internals } from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 import * as LiteLlmAuth from '../src/index.ts'
@@ -66,6 +66,12 @@ function cookieOf(response: Response): string {
   expect(header).not.toBeNull()
   return header!.split(';')[0]!
 }
+
+describe('internals.createClient', () => {
+  it('builds a real LiteLlmClient by default', () => {
+    expect(createClient({ baseURL: 'https://proxy.example', timeoutMs: 1000 })).toBeInstanceOf(LiteLlmClient)
+  })
+})
 
 describe('the sign-in page', () => {
   it('is reachable with no identity at all', async () => {
@@ -139,6 +145,52 @@ describe('signing in with a virtual key', () => {
     const port = await boot()
     expect((await signIn(port, 'sk-nameless')).status).toBe(403)
   })
+
+  it('refuses a submission naming no apiKey field at all', async () => {
+    scriptProxy({})
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ next: '/' }),
+    })
+    expect(response.status).toBe(400)
+    expect(await response.text()).toContain('Enter your LiteLLM virtual key')
+  })
+
+  it('refuses an oversized form body with the HTML form, not JSON', async () => {
+    scriptProxy({})
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ apiKey: 'x'.repeat(9000) }),
+    })
+    expect(response.status).toBe(413)
+    expect(response.headers.get('content-type')).toContain('text/html')
+  })
+
+  it('reports a proxy failure that is neither an auth refusal nor a transport failure', async () => {
+    internals.createClient = () => ({
+      verifyKey: () => Promise.reject(new LiteLlmRequestError({ code: 'RATE_LIMIT', message: 'slow down', status: 429 })),
+      listModels: () => Promise.resolve([]),
+    }) as unknown as LiteLlmClient
+    const port = await boot()
+    const response = await signIn(port, 'sk-alice')
+    expect(response.status).toBe(502)
+    expect(await response.text()).toContain('slow down')
+  })
+
+  it('reports an unexpected non-proxy failure as a generic sign-in failure', async () => {
+    internals.createClient = () => ({
+      verifyKey: () => Promise.reject(new Error('boom')),
+      listModels: () => Promise.resolve([]),
+    }) as unknown as LiteLlmClient
+    const port = await boot()
+    const response = await signIn(port, 'sk-alice')
+    expect(response.status).toBe(500)
+    expect(await response.text()).toContain('unexpected reason')
+  })
 })
 
 describe('the programmatic sign-in', () => {
@@ -181,6 +233,53 @@ describe('the programmatic sign-in', () => {
       body: JSON.stringify({ apiKey: 'x'.repeat(9000) }),
     })
     expect(response.status).toBe(413)
+  })
+
+  it('refuses a key the proxy rejects with a JSON body', async () => {
+    scriptProxy({})
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-wrong' }),
+    })
+    expect(response.status).toBe(401)
+    expect((await response.json() as { error: string }).error).toContain('refused by the LiteLLM proxy')
+  })
+
+  it('refuses a key naming no user with a JSON body', async () => {
+    scriptProxy({ 'sk-nameless': {} })
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'sk-nameless' }),
+    })
+    expect(response.status).toBe(403)
+  })
+
+  it('refuses an empty key with a JSON body', async () => {
+    scriptProxy({})
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: '   ' }),
+    })
+    expect(response.status).toBe(400)
+  })
+
+  it('closes a session from a JSON caller', async () => {
+    scriptProxy({ 'sk-alice': { user_id: 'alice', models: [] } })
+    const port = await boot()
+    const cookie = cookieOf(await signIn(port, 'sk-alice'))
+    const response = await fetch(url(port, LOGOUT_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ signedOut: true })
+    expect((await fetch(url(port, SESSION_PATH), { headers: { cookie } })).status).toBe(401)
   })
 })
 
@@ -228,6 +327,20 @@ describe('the principal service the plugin provides', () => {
     const principal = context!.principal.authenticate({ headers: { cookie } })
     expect(principal?.models).toEqual(['gpt-4o'])
     expect(principal?.secret).toBe('sk-alice')
+  })
+
+  it('authenticates a request carrying its cookie in a Headers instance', async () => {
+    scriptProxy({ 'sk-alice': { user_id: 'alice', models: [] } })
+    const port = await boot()
+    const cookie = cookieOf(await signIn(port, 'sk-alice'))
+    const principal = context!.principal.authenticate({ headers: new Headers({ cookie }) })
+    expect(principal?.secret).toBe('sk-alice')
+  })
+
+  it('answers undefined for a Headers instance carrying no cookie', async () => {
+    scriptProxy({})
+    await boot()
+    expect(context!.principal.authenticate({ headers: new Headers() })).toBeUndefined()
   })
 
   it('reports whether the deployment refuses unauthenticated requests', async () => {

@@ -25,7 +25,7 @@ function proxy(routes: Record<string, { status?: number; body?: unknown; headers
     }
     return Promise.resolve(new Response(
       typeof route.body === 'string' ? route.body : JSON.stringify(route.body ?? {}),
-      { status: route.status ?? 200, headers: route.headers },
+      { status: route.status ?? 200, ...route.headers === undefined ? {} : { headers: route.headers } },
     ))
   }
   return { fetch: fetchImpl, calls }
@@ -91,6 +91,17 @@ describe('parseKeyIdentity', () => {
   it('drops limits the proxy sent as null or zero', () => {
     const identity = parseKeyIdentity({ info: { user_id: 'u', max_budget: null, spend: 0, expires: null } })
     expect(identity).toEqual({ userId: 'u', models: [], spend: 0 })
+  })
+
+  it('omits spend entirely when the proxy reports every other optional field but not it', () => {
+    expect(parseKeyIdentity({
+      info: { user_id: 'u', key_alias: 'laptop', team_id: 't1', max_budget: 25, models: [] },
+    })).toEqual({ userId: 'u', keyAlias: 'laptop', teamId: 't1', models: [], maxBudget: 25 })
+  })
+
+  it('reads an expiry the proxy declared', () => {
+    expect(parseKeyIdentity({ info: { user_id: 'u', models: [], expires: '2027-01-01T00:00:00Z' } }))
+      .toEqual({ userId: 'u', models: [], expiresAt: '2027-01-01T00:00:00Z' })
   })
 })
 
@@ -230,5 +241,27 @@ describe('LiteLlmClient endpoints', () => {
       headers: { 'x-deployment': 'blue' },
     }).verifyKey('sk-x')
     expect(seen[0]?.['x-deployment']).toBe('blue')
+  })
+
+  it('uses the global fetch when no override is given', async () => {
+    const realFetch = globalThis.fetch
+    let called = false
+    globalThis.fetch = (..._args: Parameters<typeof fetch>) => {
+      called = true
+      return Promise.resolve(new Response(JSON.stringify({ info: { user_id: 'u', models: [] } })))
+    }
+    try {
+      await new LiteLlmClient({ baseURL: 'https://proxy.example', timeoutMs: 5000 }).verifyKey('sk-x')
+      expect(called).toBe(true)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+  })
+
+  it('composes a caller signal with its own timeout signal', async () => {
+    const scripted = proxy({ '/key/info': { body: { info: { user_id: 'u', models: [] } } } })
+    const controller = new AbortController()
+    await client(scripted.fetch).verifyKey('sk-x', controller.signal)
+    expect(scripted.calls).toHaveLength(1)
   })
 })

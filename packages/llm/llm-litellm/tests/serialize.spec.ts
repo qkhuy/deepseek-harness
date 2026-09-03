@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { brandString } from '@deepseek-ai/dsh-brand'
+import type { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { createMessage } from '@deepseek-ai/dsh-llm'
 import type { Message, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { serializeMessages, serializeTools } from '../src/index.ts'
@@ -75,7 +76,7 @@ describe('serializeMessages', () => {
       content: [{
         type: 'image',
         attachment: {
-          attachmentId: brandString('att-1'), mediaType: 'image/png', bytes: 10, width: 2, height: 2,
+          attachmentId: brandString<AttachmentId>('att-1'), mediaType: 'image/png', bytes: 10, width: 2, height: 2,
         },
       }],
       source: { kind: 'user' },
@@ -94,6 +95,32 @@ describe('serializeMessages', () => {
     expect(serializeMessages([user('a')].concat(assistant([
       { type: 'text', text: 'one' }, { type: 'text', text: 'two' },
     ])))[1]?.content).toBe('one\ntwo')
+  })
+
+  it('contributes no text for a tool-result or unrecognized block reached by construction, not routing', () => {
+    // Neither shape appears in an assistant message's content in practice —
+    // tool-result blocks live inside a tool-kind source message, and no
+    // producer emits an unknown block type — but ContentBlock is
+    // merge-extensible, so the switch must still fall through both instead of
+    // throwing on a block position the type system does not forbid.
+    const exotic = assistant([
+      { type: 'text', text: 'before' },
+      { type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: 'nested' }] },
+      { type: 'unknown-future-block' } as unknown as Message['content'][number],
+      { type: 'text', text: 'after' },
+    ])
+    expect(serializeMessages([exotic])[0]?.content).toBe('before\nafter')
+  })
+
+  it('drops a tool-kind message whose content carries no tool-result block', () => {
+    // The tool source guarantees the block by construction; a hand-built
+    // request the seam does not type-check can omit it.
+    const malformed = createMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'not a tool result' }],
+      source: { kind: 'tool', callId },
+    })
+    expect(serializeMessages([malformed])).toEqual([])
   })
 })
 

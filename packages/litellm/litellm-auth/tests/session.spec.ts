@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { principalId } from '@deepseek-ai/dsh-principal'
 import type { Principal } from '@deepseek-ai/dsh-principal'
-import { LiteLlmSessionStore, principalIdForLiteLlmUser, readCookie, safeReturnPath, sessionCookie } from '../src/index.ts'
+import {
+  LiteLlmSessionStore, principalIdForLiteLlmUser, readCookie, resolveBaseUrl, safeReturnPath, sessionCookie,
+} from '../src/index.ts'
 
 const principal = (id: string): Principal => ({
   id: principalId(id), displayName: id, secret: `sk-${id}`, models: [],
@@ -145,5 +148,27 @@ describe('safeReturnPath', () => {
     ]) {
       expect(safeReturnPath(hostile)).toBe('/')
     }
+  })
+})
+
+describe('resolveBaseUrl', () => {
+  it('falls back to $LITELLM_BASE_URL when the config omits baseURL', () => {
+    const environment = createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { LITELLM_BASE_URL: 'https://env.example' } },
+    ])
+    expect(resolveBaseUrl({}, environment)).toBe('https://env.example')
+  })
+
+  it('prefers an explicitly configured baseURL over the environment', () => {
+    const environment = createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { LITELLM_BASE_URL: 'https://env.example' } },
+    ])
+    expect(resolveBaseUrl({ baseURL: 'https://configured.example' }, environment)).toBe('https://configured.example')
+  })
+
+  it('throws with neither a configured baseURL nor the environment variable', () => {
+    const environment = createLaunchEnvironmentSnapshot([{ source: 'process', values: {} }])
+    expect(() => resolveBaseUrl({}, environment)).toThrow(/no proxy endpoint/)
+    expect(() => resolveBaseUrl({})).toThrow(/no proxy endpoint/)
   })
 })

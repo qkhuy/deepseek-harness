@@ -65,6 +65,13 @@ describe('BlockWriter', () => {
     drain(writer.close())
     expect(drain(writer.close())).toEqual([])
   })
+
+  it('keeps the delta stream well-formed when arguments arrive before an id', () => {
+    const writer = new BlockWriter()
+    const delta = drain(writer.write('tool:0', '{}'))
+    expect(delta[1]).toMatchObject({ type: 'tool-call-delta', id: '' })
+    expect(drain(writer.close())[0]).toMatchObject({ block: { id: '', name: '' } })
+  })
 })
 
 describe('finishReason', () => {
@@ -113,5 +120,6 @@ describe('tokenUsage', () => {
 
   it('reads a usage object reporting only one side', () => {
     expect(tokenUsage({ completion_tokens: 7 })).toEqual({ inputTokens: 0, outputTokens: 7 })
+    expect(tokenUsage({ prompt_tokens: 7 })).toEqual({ inputTokens: 7, outputTokens: 0 })
   })
 })

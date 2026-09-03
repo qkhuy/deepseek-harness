@@ -109,7 +109,14 @@ export function safeReturnPath(requested: string | undefined): string {
   return requested
 }
 
-/** Answer one JSON document with no-store caching, the only caching a sign-in surface may use. */
+/**
+ * Answer one JSON document with no-store caching, the only caching a sign-in
+ * surface may use.
+ * @param response - the response to own and end.
+ * @param status - the HTTP status to answer.
+ * @param body - the value serialized as the JSON body.
+ * @param setCookie - a `Set-Cookie` value to send with the answer, when one applies.
+ */
 export function writeJson(response: ServerResponse, status: number, body: unknown, setCookie?: string): void {
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -119,7 +126,13 @@ export function writeJson(response: ServerResponse, status: number, body: unknow
   response.end(JSON.stringify(body))
 }
 
-/** Answer one HTML document with no-store caching. */
+/**
+ * Answer one HTML document with no-store caching.
+ * @param response - the response to own and end.
+ * @param status - the HTTP status to answer.
+ * @param html - the complete document to send.
+ * @param setCookie - a `Set-Cookie` value to send with the answer, when one applies.
+ */
 export function writeHtml(response: ServerResponse, status: number, html: string, setCookie?: string): void {
   response.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
@@ -129,7 +142,12 @@ export function writeHtml(response: ServerResponse, status: number, html: string
   response.end(html)
 }
 
-/** Answer one redirect the browser follows after a sign-in or sign-out. */
+/**
+ * Answer one redirect the browser follows after a sign-in or sign-out.
+ * @param response - the response to own and end.
+ * @param location - the same-origin path to send the browser to.
+ * @param setCookie - a `Set-Cookie` value to send with the redirect, when one applies.
+ */
 export function writeRedirect(response: ServerResponse, location: string, setCookie?: string): void {
   response.writeHead(303, {
     'location': location,

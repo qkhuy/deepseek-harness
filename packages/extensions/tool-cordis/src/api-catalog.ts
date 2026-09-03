@@ -1288,6 +1288,38 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'principal',
+    summary: 'Abstract principal service: request authentication plus the ambient binding every downstream consumer reads.',
+    description: 'Abstract principal service: request authentication plus the ambient binding every downstream consumer reads.\n\nThe binding half is concrete here rather than left to providers, because two providers with two `AsyncLocalStorage` instances would each be invisible to the other\'s consumers — the store is the seam\'s identity, not an implementation choice. Providers implement authentication alone.',
+    methods: [
+      {
+        signature: 'abstract authenticate(request: PrincipalRequest): Principal | undefined',
+        description: 'Resolve the user behind one inbound request. Synchronous by contract: the carrier answers a request before any handler runs, so a provider keeps whatever it needs — a signed cookie\'s secret, a live session table — loaded ahead of time rather than reaching for it per request.',
+        parameters: [{ name: 'request', description: 'inbound request headers, either carrier\'s representation.' }],
+        returns: 'the authenticated principal, or `undefined` when the request carries no valid identity.',
+      },
+      {
+        signature: 'run<T>(principal: Principal, fn: () => T): T',
+        description: 'Bind `principal` to `fn` and everything it awaits, then restore the previous binding. Nesting is legal and the innermost binding wins.',
+        parameters: [{ name: 'principal', description: 'the user to bind.' }, { name: 'fn', description: 'the region to run under that binding.' }],
+        returns: 'whatever `fn` returns.',
+      },
+      {
+        signature: 'current(): Principal | undefined',
+        description: 'The principal bound to the current async region.',
+        parameters: [],
+        returns: 'the bound principal, or `undefined` outside any {@link run} region.',
+      },
+      {
+        signature: 'require(consumer: string): Principal',
+        description: 'The principal bound to the current async region, or a refusal naming the consumer that needed one. Consumers whose behavior is undefined without a user call this instead of branching on current.',
+        parameters: [{ name: 'consumer', description: 'the calling package or plugin name, for the diagnostic.' }],
+        returns: 'the bound principal.',
+        throws: ['PrincipalRequiredError when no principal is bound.'],
+      },
+    ],
+  },
+  {
     key: 'sandbox',
     summary: 'Abstract process-sandbox service.',
     description: 'Abstract process-sandbox service. confine must return enforcing argv or fail closed at wrap or runner-execution time; silent unconfined passthrough is forbidden. Functional probes arbitrate multi-runner chains and may be skipped for a sole candidate, whose own refusal remains the fail-closed end.',
@@ -4525,6 +4557,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PreToolDecision = {\n    kind: \'allow\';\n} | {\n    kind: \'deny\';\n    reason: string;\n} | {\n    kind: \'ask\';\n    reason?: string;\n};',
   },
   {
+    name: 'Principal',
+    declaration: 'export interface Principal {\n    readonly id: PrincipalId;\n    readonly displayName: string;\n    readonly secret: string;\n    readonly models: readonly string[];\n}',
+  },
+  {
+    name: 'PrincipalId',
+    declaration: 'export type PrincipalId = Branded<\'PrincipalId\'>;',
+  },
+  {
+    name: 'PrincipalRequest',
+    declaration: 'export interface PrincipalRequest {\n    readonly headers: Headers | Readonly<Record<string, string | readonly string[] | undefined>>;\n}',
+  },
+  {
     name: 'ProjectionChangeListener',
     declaration: 'export type ProjectionChangeListener = (session: Session, key: Extract<keyof SessionProjectionMap, string>, value: unknown, seq: SessionSeq) => void;',
   },
@@ -6086,7 +6130,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Workspace',
-    declaration: 'export interface Workspace {\n    readonly id: WorkspaceId;\n    readonly path: string;\n    readonly title: string;\n    readonly createdAt: string;\n    readonly updatedAt: string;\n    readonly sessionIds: readonly SessionId[];\n    setTitle(title: string): Promise<void>;\n    attachSession(sessionId: SessionId): Promise<void>;\n    insertSessionBefore(sessionId: SessionId, beforeSessionId?: SessionId): Promise<void>;\n    detachSession(sessionId: SessionId): Promise<void>;\n    status(): Promise<\'ok\' | \'missing-dir\'>;\n}',
+    declaration: 'export interface Workspace {\n    readonly id: WorkspaceId;\n    readonly path: string;\n    readonly title: string;\n    readonly owner: PrincipalId | undefined;\n    readonly createdAt: string;\n    readonly updatedAt: string;\n    readonly sessionIds: readonly SessionId[];\n    setTitle(title: string): Promise<void>;\n    attachSession(sessionId: SessionId): Promise<void>;\n    insertSessionBefore(sessionId: SessionId, beforeSessionId?: SessionId): Promise<void>;\n    detachSession(sessionId: SessionId): Promise<void>;\n    status(): Promise<\'ok\' | \'missing-dir\'>;\n}',
   },
   {
     name: 'WorkspaceArchiveSessionRequest',

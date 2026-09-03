@@ -257,6 +257,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Configuration carries references to secrets; providers own the values. Consumers resolve per operation, so a rotated credential reaches the very next request; the settings controller exposes value-free views and write-only storage.',
   },
   {
+    key: 'principal',
+    pkg: 'principal',
+    title: 'Authenticated-principal seam',
+    mode: 'seam',
+    implementations: ['litellm-auth'],
+    consumers: ['client-connection', 'workspace', 'llm-litellm'],
+    note: 'The provider names the user behind an inbound request and binds them to everything that request starts; consumers read the binding to send that user\'s credential and to show that user\'s records. With no provider mounted the service is absent and every consumer keeps its single-operator behavior.',
+  },
+  {
     key: 'authorization',
     pkg: 'authorization',
     title: 'Authorization flow registry',

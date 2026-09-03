@@ -937,6 +937,55 @@ export interface Config {
 
 来源：[`packages/jobs/jobs-local/src/index.ts:31`](../packages/jobs/jobs-local/src/index.ts)
 
+<a id="deepseek-aidsh-litellm-auth"></a>
+
+## `@deepseek-ai/dsh-litellm-auth`
+
+需要：`webServer`
+
+```ts config-catalog
+/**
+ * Plugin config. Every deployment-varying choice is here: the proxy to
+ * authenticate against, how long a sign-in lasts, and the two cookie
+ * attributes that depend on how the deployment is served.
+ */
+export interface Config {
+  /**
+   * LiteLLM proxy URL, with or without a `/v1` suffix. Omitted here it falls
+   * back to `$LITELLM_BASE_URL` from a trusted environment layer; a mount that
+   * resolves to neither fails at load, because there is no default proxy to
+   * authenticate against and guessing one would send a user's key somewhere
+   * they did not name.
+   */
+  baseURL?: string
+  /** Session lifetime in minutes, from sign-in. @default 720 */
+  sessionTtlMinutes?: number
+  /** Timeout in milliseconds for each key-verification call to the proxy. @default 15000 */
+  verifyTimeoutMs?: number
+  /** Session cookie name. @default 'dsh-litellm-session' */
+  cookieName?: string
+  /**
+   * Whether to mark the session cookie `Secure`. Enable it wherever the
+   * surface is served over HTTPS; leaving it set on a plain-HTTP deployment
+   * makes every sign-in silently fail to stick.
+   * @default false
+   */
+  secureCookie?: boolean
+  /**
+   * Whether unauthenticated requests are refused. `false` keeps the surface
+   * open and binds a principal only to requests that carry a session, which is
+   * the posture for adding sign-in to a single-operator deployment without
+   * locking it.
+   * @default true
+   */
+  requireLogin?: boolean
+  /** Extra headers sent with each proxy management call, for deployment routing. */
+  headers?: Record<string, string>
+}
+```
+
+来源：[`packages/litellm/litellm-auth/src/index.ts:62`](../packages/litellm/litellm-auth/src/index.ts)
+
 <a id="deepseek-aidsh-llm-deepseek"></a>
 
 ## `@deepseek-ai/dsh-llm-deepseek`
@@ -1017,6 +1066,50 @@ export interface DeepSeekCatalogModel {
 依赖：[`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts)
 
 来源：[`packages/llm/llm-deepseek/src/index.ts:125`](../packages/llm/llm-deepseek/src/index.ts)
+
+<a id="deepseek-aidsh-llm-litellm"></a>
+
+## `@deepseek-ai/dsh-llm-litellm`
+
+需要：`llm`
+
+```ts config-catalog
+/**
+ * Plugin config. `apiKeyEnv` is deliberately not the primary credential: it
+ * serves requests no principal made, and a signed-in user's key always wins.
+ */
+export interface Config {
+  /**
+   * LiteLLM proxy URL, with or without a `/v1` suffix. Omitted here it falls
+   * back to `$LITELLM_BASE_URL` from a trusted environment layer; a mount that
+   * resolves to neither fails at load, because there is no default proxy and
+   * guessing one would send a user's key somewhere they did not name.
+   */
+  baseURL?: string
+  /**
+   * Credential reference for requests no signed-in user made. Resolved per
+   * request through the credential seam, so no secret enters configuration.
+   * @default 'LITELLM_API_KEY'
+   */
+  apiKeyEnv?: string
+  /** Model-request timeout in milliseconds. @default 600000 */
+  timeoutMs?: number
+  /** Timeout in milliseconds for each catalog read. @default 15000 */
+  catalogTimeoutMs?: number
+  /** How long a per-user catalog stays cached, in seconds. @default 300 */
+  catalogTtlSeconds?: number
+  /** Context capacity assumed for a model the proxy does not size. @default 128000 */
+  defaultContextWindow?: number
+  /** Extra headers merged into every proxy request, for deployment routing. */
+  headers?: Record<string, string>
+  /** Route-owned retry policy executed by `dsh-llm-retry`. */
+  retryPolicy?: RetryPolicyConfig
+}
+```
+
+Depends on: [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts)
+
+来源：[`packages/llm/llm-litellm/src/index.ts:57`](../packages/llm/llm-litellm/src/index.ts)
 
 <a id="deepseek-aidsh-llm-pi-ai"></a>
 
@@ -3424,6 +3517,7 @@ export interface Config {
 - `@deepseek-ai/dsh-fs` — 抽象 `FileSystem`（[`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts)）
 - `@deepseek-ai/dsh-host-directory-picker` — 抽象 `DirectoryPicker`（[`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts)）
 - `@deepseek-ai/dsh-jobs` — 抽象 `JobRegistry`（[`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts)）
+- `@deepseek-ai/dsh-principal` — 抽象 `PrincipalService`（[`packages/identity/principal/src/index.ts`](../packages/identity/principal/src/index.ts)）
 - `@deepseek-ai/dsh-sandbox` — 抽象 `SandboxProvider`（[`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts)）
 - `@deepseek-ai/dsh-session-persistence` — 抽象 `SessionPersistence`（[`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts)）
 - `@deepseek-ai/dsh-session-query` — 抽象 `SessionQueryEngine`（[`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts)）
@@ -3457,6 +3551,8 @@ export interface Config {
 - `@deepseek-ai/dsh-hook-protocol`（[`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts)）
 - `@deepseek-ai/dsh-http-proxy`（[`packages/util/http-proxy/src/index.ts`](../packages/util/http-proxy/src/index.ts)）
 - `@deepseek-ai/dsh-launch-environment`（[`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts)）
+- `@deepseek-ai/dsh-litellm-client`（[`packages/litellm/litellm-client/src/index.ts`](../packages/litellm/litellm-client/src/index.ts)）
+- `@deepseek-ai/dsh-litellm-web`（[`packages/bundle/litellm-web/src/index.ts`](../packages/bundle/litellm-web/src/index.ts)）
 - `@deepseek-ai/dsh-llm-mock-server`（[`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts)）
 - `@deepseek-ai/dsh-loader-smoke`（[`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts)）
 - `@deepseek-ai/dsh-native-command`（[`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts)）

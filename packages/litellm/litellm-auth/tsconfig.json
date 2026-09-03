@@ -25,6 +25,9 @@
     },
     {
       "path": "../litellm-client"
+    },
+    {
+      "path": "../../util/launch-environment"
     }
   ]
 }
