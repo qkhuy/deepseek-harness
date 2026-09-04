@@ -160,6 +160,10 @@ export class LiteLlmPrincipals extends PrincipalService {
     return this.requireLogin
   }
 
+  override get signInUrl(): string {
+    return LOGIN_PATH
+  }
+
   override authenticate(request: PrincipalRequest): Principal | undefined {
     const { headers } = request
     const raw = headers instanceof Headers

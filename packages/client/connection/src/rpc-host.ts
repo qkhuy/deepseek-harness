@@ -33,6 +33,25 @@ const INVALID_REQUEST_RPC_ID = RpcId('invalid-request')
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
 const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
 
+/**
+ * Reduce the index request's own path to one safe to forward as a sign-in
+ * page's `next` value. Only a rooted same-origin path survives: anything
+ * starting with `//` or carrying a scheme would turn a sign-in redirect into
+ * an open one. The concrete sign-in pages in this codebase already
+ * re-validate `next` themselves before using it, so this is defense in depth
+ * for a seam whose page does not.
+ * @param requested - the request's own `url`, verbatim.
+ * @returns a safe absolute path, defaulting to `/`.
+ */
+function safeIndexPath(requested: string | undefined): string {
+  if (requested === undefined || !requested.startsWith('/') || requested.startsWith('//')) return '/'
+  // A backslash is a path separator to some browsers' URL parsers but not to
+  // WHATWG's, so `/\evil.example` would resolve off-origin in exactly the
+  // clients that matter here.
+  if (requested.includes('\\')) return '/'
+  return requested
+}
+
 interface ConnectionRpcInterceptor {
   readonly matches: ConnectionRpcEndpointMatcher
   readonly fetchHandler: FetchHandler
@@ -115,13 +134,29 @@ export class HostConnectionService extends Service implements HostConnectionHand
   /**
    * Authenticate an index request through the process-token exchange or cookie.
    *
-   * Under a mounted principal seam the index is served unauthenticated: the
-   * sign-in page is a document the browser must be able to reach before it has
-   * any identity, and every authority the page could exercise lives behind
-   * `/api`, which {@link requestRejection} still gates.
+   * Under a mounted principal seam that names its own `signInUrl`, an
+   * unauthenticated visitor is redirected there instead of being handed the
+   * application document: every authority the
+   * document could exercise lives behind `/api`, which {@link requestRejection}
+   * already refuses, so serving it anyway would only load a shell that can do
+   * nothing and never tell the visitor why. A seam with no dedicated sign-in
+   * page — one that authenticates out of band, say a header a reverse proxy
+   * attaches — keeps the prior unauthenticated-document behavior, because there
+   * is nowhere useful to send the browser instead.
    */
   authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean {
-    if (this.ctx.get('principal') !== undefined) return true
+    const principals = this.ctx.get('principal')
+    if (principals !== undefined) {
+      if (principals.authenticate(request) !== undefined || !principals.required) return true
+      const signInUrl = principals.signInUrl
+      if (signInUrl === undefined) return true
+      response.writeHead(303, {
+        'cache-control': 'no-store',
+        'location': `${signInUrl}?next=${encodeURIComponent(safeIndexPath(request.url))}`,
+      })
+      response.end()
+      return false
+    }
     return this.browserAuth.authorizeIndex(request, response)
   }
 
