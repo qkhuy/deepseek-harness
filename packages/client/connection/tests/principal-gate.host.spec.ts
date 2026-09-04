@@ -21,11 +21,13 @@ const alice: Principal = {
 
 /** A seam that recognizes exactly one session cookie value. */
 class CookiePrincipals extends PrincipalService {
-  constructor(ctx: Context, private readonly config: { required: boolean }) {
+  constructor(ctx: Context, private readonly config: { required: boolean; signInUrl?: string }) {
     super(ctx)
   }
 
   override get required(): boolean { return this.config.required }
+
+  override get signInUrl(): string | undefined { return this.config.signInUrl }
 
   override authenticate(request: PrincipalRequest): Principal | undefined {
     const { headers } = request
@@ -52,18 +54,22 @@ function fakeRequest(headers: Record<string, string>, url = '/'): IncomingMessag
   return request
 }
 
-function fakeResponse(): { response: ServerResponse; state: { status?: number } } {
-  const state: { status?: number } = {}
+function fakeResponse(): { response: ServerResponse; state: { status?: number; headers?: Record<string, string> } } {
+  const state: { status?: number; headers?: Record<string, string> } = {}
   const response = Object.assign(new EventEmitter(), {
     writableEnded: false,
-    writeHead(value: number) { state.status = value; return this },
+    writeHead(value: number, headers?: Record<string, string>) {
+      state.status = value
+      if (headers !== undefined) state.headers = headers
+      return this
+    },
     write() { return true },
     end(this: { writableEnded: boolean }) { this.writableEnded = true; return this },
   }) as unknown as ServerResponse
   return { response, state }
 }
 
-async function mounted(options: { principal?: 'required' | 'optional' } = {}): Promise<{
+async function mounted(options: { principal?: 'required' | 'optional'; signInUrl?: string } = {}): Promise<{
   connection: HostConnectionHandle
   routes: WebRoute[]
   ctx: Context
@@ -74,7 +80,10 @@ async function mounted(options: { principal?: 'required' | 'optional' } = {}): P
   provideBrowserCredentials(ctx)
   ctx.provide('webServer', fakeHttpServer(routes) as WebServer)
   if (options.principal !== undefined) {
-    await ctx.plugin(CookiePrincipals, { required: options.principal === 'required' })
+    await ctx.plugin(CookiePrincipals, {
+      required: options.principal === 'required',
+      ...options.signInUrl === undefined ? {} : { signInUrl: options.signInUrl },
+    })
   }
   const fiber = ctx.plugin({ inject: [...inject], apply }, {})
   await fiber.await()
@@ -139,11 +148,55 @@ describe('with a principal seam mounted', () => {
     await dispose()
   })
 
-  it('serves the application document to a browser with no identity yet', async () => {
+  it('serves the application document to a browser with no identity yet, absent a sign-in page', async () => {
     const { connection, dispose } = await mounted({ principal: 'required' })
     const { response, state } = fakeResponse()
     expect(connection.authorizeIndex(fakeRequest({ host: '127.0.0.1:3080' }), response)).toBe(true)
     expect(state.status).toBeUndefined()
+    await dispose()
+  })
+
+  it('redirects an unauthenticated browser to the seam\'s own sign-in page, carrying the requested path', async () => {
+    const { connection, dispose } = await mounted({ principal: 'required', signInUrl: '/auth/litellm' })
+    const { response, state } = fakeResponse()
+    expect(connection.authorizeIndex(fakeRequest({ host: '127.0.0.1:3080' }, '/w/1'), response)).toBe(false)
+    expect(state.status).toBe(303)
+    expect(state.headers?.location).toBe('/auth/litellm?next=%2Fw%2F1')
+    expect(state.headers?.['cache-control']).toBe('no-store')
+    await dispose()
+  })
+
+  it('serves the application document straight through to a browser that already has a session', async () => {
+    const { connection, dispose } = await mounted({ principal: 'required', signInUrl: '/auth/litellm' })
+    const { response, state } = fakeResponse()
+    expect(connection.authorizeIndex(
+      fakeRequest({ 'host': '127.0.0.1:3080', 'cookie': 'session=alice' }), response,
+    )).toBe(true)
+    expect(state.status).toBeUndefined()
+    await dispose()
+  })
+
+  it('serves the application document where the deployment does not require sign-in, sign-in page or not', async () => {
+    const { connection, dispose } = await mounted({ principal: 'optional', signInUrl: '/auth/litellm' })
+    const { response, state } = fakeResponse()
+    expect(connection.authorizeIndex(fakeRequest({ host: '127.0.0.1:3080' }), response)).toBe(true)
+    expect(state.status).toBeUndefined()
+    await dispose()
+  })
+
+  it('sanitizes an off-origin request path rather than forwarding it into the sign-in redirect', async () => {
+    const { connection, dispose } = await mounted({ principal: 'required', signInUrl: '/auth/litellm' })
+    const { response, state } = fakeResponse()
+    connection.authorizeIndex(fakeRequest({ host: '127.0.0.1:3080' }, '//evil.example'), response)
+    expect(state.headers?.location).toBe('/auth/litellm?next=%2F')
+    await dispose()
+  })
+
+  it('sanitizes a backslash path a WHATWG-parsing browser would resolve off-origin', async () => {
+    const { connection, dispose } = await mounted({ principal: 'required', signInUrl: '/auth/litellm' })
+    const { response, state } = fakeResponse()
+    connection.authorizeIndex(fakeRequest({ host: '127.0.0.1:3080' }, '/\\evil.example'), response)
+    expect(state.headers?.location).toBe('/auth/litellm?next=%2F')
     await dispose()
   })
 

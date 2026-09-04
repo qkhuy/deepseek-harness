@@ -114,6 +114,22 @@ export abstract class PrincipalService extends Service {
   abstract get required(): boolean
 
   /**
+   * Where an unauthenticated browser should be sent to establish an identity,
+   * or `undefined` when this provider has no dedicated page for that — the
+   * default, kept for a provider that authenticates out of band (a header a
+   * reverse proxy attaches, say) rather than through a page of its own.
+   *
+   * A provider that does ship one overrides this so the application document
+   * itself stays behind sign-in: without it, the only reachable unauthenticated
+   * surface is `/api`, which already refuses every request, so an
+   * unauthenticated visitor would load a document that can do nothing rather
+   * than be sent anywhere useful.
+   */
+  get signInUrl(): string | undefined {
+    return undefined
+  }
+
+  /**
    * Bind `principal` to `fn` and everything it awaits, then restore the
    * previous binding. Nesting is legal and the innermost binding wins.
    * @param principal - the user to bind.

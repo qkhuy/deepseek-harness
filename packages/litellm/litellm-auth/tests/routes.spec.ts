@@ -407,6 +407,12 @@ describe('the principal service the plugin provides', () => {
     expect(context!.principal.required).toBe(false)
   })
 
+  it('names its own sign-in page for an unauthenticated browser to be sent to', async () => {
+    scriptProxy({})
+    await boot()
+    expect(context!.principal.signInUrl).toBe(LOGIN_PATH)
+  })
+
   it('forgets every session when the plugin unmounts', async () => {
     scriptProxy({ 'sk-alice': { user_id: 'alice', models: [] } })
     const port = await boot()

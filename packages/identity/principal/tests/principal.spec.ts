@@ -95,4 +95,9 @@ describe('PrincipalService.authenticate', () => {
     expect((await boot(false)).principal.required).toBe(false)
     expect((await boot(true)).principal.required).toBe(true)
   })
+
+  it('names no dedicated sign-in page by default', async () => {
+    const ctx = await boot()
+    expect(ctx.principal.signInUrl).toBeUndefined()
+  })
 })
