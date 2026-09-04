@@ -43,6 +43,14 @@ interface Workspace {
   /** Display title. Defaults to `basename(path)` at create; duplicates are allowed. */
   readonly title: string
 
+  /**
+   * The principal that created this workspace, stamped at create where a
+   * principal seam was mounted and a user was bound. Absent on a workspace
+   * created with no signed-in user — see the registry's visibility rule for
+   * what that means for who can see it.
+   */
+  readonly owner: PrincipalId | undefined
+
   /** ISO-8601 creation instant, stamped at create and never rewritten. */
   readonly createdAt: string
 
@@ -281,15 +289,20 @@ list(): Workspace[]
  * Delete one workspace registration while retaining its directory and every
  * session log. The durable order is updated before the table deletion; a
  * failed table write restores the prior order and keeps the entity
- * published. Unknown ids are an idempotent no-op for domain callers.
+ * published. Unknown ids are an idempotent no-op for domain callers, and a
+ * workspace another principal owns is treated the same as unknown: a
+ * caller that cannot see a workspace must not be able to remove it either.
  * @param id - Workspace registration to remove.
- * @returns `true` when a record was deleted, `false` when it was unknown.
+ * @returns `true` when a record was deleted, `false` when it was unknown or not owned by the caller.
  */
 delete(id: WorkspaceId): Promise<boolean>
 
 /**
  * Move one workspace within the durable display order, DOM-insertBefore-like.
- * With an anchor it lands before that workspace; without one it appends.
+ * With an anchor it lands before that workspace; without one it appends. A
+ * workspace or anchor another principal owns is rejected the same as an
+ * unknown id, so a caller can neither move nor anchor against a workspace
+ * it cannot see.
  * @param id - Workspace to move.
  * @param beforeId - Workspace anchor; omitted appends.
  * @returns the complete committed workspace order.

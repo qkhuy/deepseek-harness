@@ -11,6 +11,7 @@ import { basename } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import type { PrincipalId } from '@deepseek-ai/dsh-principal'
 import type { DomainGlobal, KvTable } from '@deepseek-ai/dsh-storage-domain'
 import { WorkspaceEntity } from './entity.ts'
 import type { WorkspaceEntityHost } from './entity.ts'
@@ -169,7 +170,8 @@ export class WorkspaceRegistry extends Service {
    * @returns the workspace, or `undefined` when unknown.
    */
   get(id: WorkspaceId): Workspace | undefined {
-    return this.entities.get(id)
+    const entity = this.entities.get(id)
+    return entity !== undefined && this.visible(entity) ? entity : undefined
   }
 
   /**
@@ -179,30 +181,40 @@ export class WorkspaceRegistry extends Service {
    * @returns a fresh ordered array of workspace entities.
    */
   list(): Workspace[] {
-    return this.requireState().workspaceIds.map((id) => {
+    const ordered = this.requireState().workspaceIds.map((id) => {
       const entity = this.entities.get(id)
       if (entity === undefined) {
         throw new Error(`workspace registry order references missing workspace '${id}'`)
       }
       return entity
     })
+    return ordered.filter(entity => this.visible(entity))
   }
 
   /**
    * Delete one workspace registration while retaining its directory and every
    * session log. The durable order is updated before the table deletion; a
    * failed table write restores the prior order and keeps the entity
-   * published. Unknown ids are an idempotent no-op for domain callers.
+   * published. Unknown ids are an idempotent no-op for domain callers, and a
+   * workspace another principal owns is treated the same as unknown: a
+   * caller that cannot see a workspace must not be able to remove it either.
    * @param id - Workspace registration to remove.
-   * @returns `true` when a record was deleted, `false` when it was unknown.
+   * @returns `true` when a record was deleted, `false` when it was unknown or not owned by the caller.
    */
   delete(id: WorkspaceId): Promise<boolean> {
-    return this.enqueueOperation(() => this.deleteKnown(id))
+    return this.enqueueOperation(async () => {
+      const entity = this.entities.get(id)
+      if (entity === undefined || !this.visible(entity)) return false
+      return await this.deleteKnown(id, entity)
+    })
   }
 
   /**
    * Move one workspace within the durable display order, DOM-insertBefore-like.
-   * With an anchor it lands before that workspace; without one it appends.
+   * With an anchor it lands before that workspace; without one it appends. A
+   * workspace or anchor another principal owns is rejected the same as an
+   * unknown id, so a caller can neither move nor anchor against a workspace
+   * it cannot see.
    * @param id - Workspace to move.
    * @param beforeId - Workspace anchor; omitted appends.
    * @returns the complete committed workspace order.
@@ -210,9 +222,15 @@ export class WorkspaceRegistry extends Service {
   insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]> {
     return this.enqueueOperation(async () => {
       const state = this.requireState()
-      if (!state.workspaceIds.includes(id)) throw new WorkspaceOrderInvalidError(id)
-      if (beforeId !== undefined && !state.workspaceIds.includes(beforeId)) {
-        throw new WorkspaceOrderInvalidError(beforeId)
+      const entity = this.entities.get(id)
+      if (!state.workspaceIds.includes(id) || entity === undefined || !this.visible(entity)) {
+        throw new WorkspaceOrderInvalidError(id)
+      }
+      if (beforeId !== undefined) {
+        const anchor = this.entities.get(beforeId)
+        if (!state.workspaceIds.includes(beforeId) || anchor === undefined || !this.visible(anchor)) {
+          throw new WorkspaceOrderInvalidError(beforeId)
+        }
       }
       if (beforeId === id) return state.workspaceIds
       const without = state.workspaceIds.filter(workspaceId => workspaceId !== id)
@@ -277,14 +295,46 @@ export class WorkspaceRegistry extends Service {
   async resolveByPath(path: string): Promise<Workspace | undefined> {
     const canonical = await realpathNormalize(path)
     for (const entity of this.entities.values()) {
-      if (entity.path === canonical) return entity
+      if (entity.path === canonical && this.visible(entity)) return entity
     }
     return undefined
   }
 
+  /**
+   * The principal that owns anything created on this call, or `undefined` when
+   * no user is bound.
+   * @returns the bound principal's id, or `undefined`.
+   */
+  private currentOwner(): PrincipalId | undefined {
+    return this.ctx.get('principal')?.current()?.id
+  }
+
+  /**
+   * Whether the caller may see one workspace.
+   *
+   * The rule has two halves and they are deliberately asymmetric. With no user
+   * bound — no principal seam, or work no request started — every record is
+   * visible, which is the single-operator behavior this registry has always
+   * had. With a user bound, only records that user owns are visible, and an
+   * unowned record is NOT among them: sharing it with every signed-in user is
+   * exactly the outcome per-user workspaces exist to prevent, so a registry
+   * that predates sign-in keeps its records for the unauthenticated CLI rather
+   * than handing them to whoever signs in first.
+   * @param entity - the workspace to judge.
+   * @returns true when the caller may see it.
+   */
+  private visible(entity: WorkspaceEntity): boolean {
+    const owner = this.currentOwner()
+    return owner === undefined || entity.owner === owner
+  }
+
   private async createCanonical(canonical: string, title?: string): Promise<WorkspaceEntity> {
+    // Reuse is per owner: two signed-in users opening the same directory each
+    // get their own registration, because a shared record would put one user's
+    // sessions on the other's workspace.
+    const owner = this.currentOwner()
     for (const entity of this.entities.values()) {
-      if (entity.path === canonical) return entity
+      if (entity.path === canonical && this.visible(entity)) return entity
     }
 
     const workspaceName = title ?? basename(canonical)
@@ -298,6 +348,7 @@ export class WorkspaceRegistry extends Service {
       sessionIds: [],
       createdAt: now,
       updatedAt: now,
+      ...owner === undefined ? {} : { owner },
     }
     const entity = new WorkspaceEntity(this.host, id, record)
     this.entities.set(id, entity)
@@ -355,9 +406,7 @@ export class WorkspaceRegistry extends Service {
     return entity
   }
 
-  private async deleteKnown(id: WorkspaceId): Promise<boolean> {
-    const entity = this.entities.get(id)
-    if (entity === undefined) return false
+  private async deleteKnown(id: WorkspaceId, entity: WorkspaceEntity): Promise<boolean> {
     const state = this.requireState()
     const nextState = {
       initialized: true,

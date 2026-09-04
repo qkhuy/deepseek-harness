@@ -7,6 +7,7 @@
 
 import { z } from 'zod'
 import { brandString } from '@deepseek-ai/dsh-brand'
+import type { PrincipalId } from '@deepseek-ai/dsh-principal'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { WorkspaceId } from './types.ts'
@@ -18,6 +19,12 @@ const workspaceId = z.string().transform(value => value as WorkspaceId)
  * Durable shape of one workspace record. `path` is the `fs.realpath` canon
  * stamped at create; `sessionIds` is the ordered ownership account (array
  * order is display order); timestamps are ISO-8601 strings.
+ *
+ * `owner` is the principal that created the workspace, stamped only where a
+ * principal seam is mounted and a user was bound. It is optional because the
+ * single-operator posture has no principal to name, and because records
+ * written before the field existed must keep parsing; the registry's
+ * visibility rule, not this schema, decides what an absent owner means.
  */
 export const workspaceRecord = z.object({
   path: z.string(),
@@ -25,6 +32,7 @@ export const workspaceRecord = z.object({
   sessionIds: z.array(z.string().transform(value => brandString<SessionId>(value))),
   createdAt: z.string(),
   updatedAt: z.string(),
+  owner: z.string().transform(value => brandString<PrincipalId>(value)).optional(),
 })
 
 /** One stored workspace record, inferred from {@link workspaceRecord}. */
@@ -67,7 +75,7 @@ export type WorkspaceDomainState = z.infer<typeof workspaceDomainState>
  */
 export const workspaceDomainSpec = defineDomain({
   name: 'workspace',
-  version: 2,
+  version: 3,
   global: {
     schema: workspaceDomainState,
     initial: { initialized: false, workspaceIds: [], archivedSessionIds: [] },

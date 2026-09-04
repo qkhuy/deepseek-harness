@@ -121,7 +121,12 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
         res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
         return
       }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      // Binding here rather than inside the bridge is what carries the user
+      // into everything the request starts: a session turn begun on this
+      // request keeps the binding through every await it makes.
+      await connection.runAuthenticated(req, async () => {
+        await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      })
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')

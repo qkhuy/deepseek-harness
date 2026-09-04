@@ -1,0 +1,45 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../../vendor/cosmokit"
+    },
+    {
+      "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../../vendor/schemastery"
+    },
+    {
+      "path": "../llm"
+    },
+    {
+      "path": "../../credentials/credentials"
+    },
+    {
+      "path": "../../identity/principal"
+    },
+    {
+      "path": "../../litellm/litellm-client"
+    },
+    {
+      "path": "../../settings/settings"
+    },
+    {
+      "path": "../../util/brand"
+    },
+    {
+      "path": "../../attachment/attachment"
+    },
+    {
+      "path": "../../util/launch-environment"
+    }
+  ]
+}

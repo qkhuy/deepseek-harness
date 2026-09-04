@@ -192,6 +192,21 @@ export interface HostConnectionHandle {
    * @returns root URL accepted by {@link authorizeIndex} for initial login.
    */
   authenticatedUrl(baseUrl: string): string
+
+  /**
+   * Run one already-accepted request's handling as the user it belongs to.
+   *
+   * With no principal seam mounted this is a plain call: the deployment has
+   * one operator and nothing to bind. With a seam mounted, the region and
+   * everything it awaits read that user through `ctx.principal.current()`,
+   * which is what lets a model adapter send their key and a registry show
+   * their records without either being handed a parameter it has no business
+   * receiving.
+   * @param request - the request whose identity to bind.
+   * @param handle - the handling region.
+   * @returns whatever `handle` returns.
+   */
+  runAuthenticated<T>(request: ConnectionTrustRequest, handle: () => T): T
 }
 
 /** Transport-independent Fetch handler used by HTTP and worker carriers. */

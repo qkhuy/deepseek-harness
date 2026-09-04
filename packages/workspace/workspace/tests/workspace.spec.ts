@@ -16,10 +16,14 @@ import WorkspaceRegistry, {
   WorkspaceId,
   WorkspaceMoveInvalidError,
   WorkspaceOrderInvalidError,
+  workspaceDomainSpec,
 } from '../src/index.ts'
 import type { WorkspaceDomainState, WorkspaceRecord } from '../src/index.ts'
 
-const DOMAIN_VERSION = 2
+// Read from the spec rather than restated: a seeded medium must be stamped
+// with whatever version the registry currently opens, or every restart case
+// fails on the stamp instead of on the behavior it covers.
+const DOMAIN_VERSION = workspaceDomainSpec.version
 
 const header = (id: string, cwd?: string, createdAt = 0): SessionHeader => ({
   version: 0,

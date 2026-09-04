@@ -253,6 +253,53 @@ Host service backing the generated `ctx.remote.credentials` namespace. It carrie
 
 Source: [`packages/api/settings-controller/src/credentials.ts`](../../packages/api/settings-controller/src/credentials.ts)
 
+<a id="ctxprincipal--principalservice-abstract-seam"></a>
+
+### `ctx.principal` — `PrincipalService` (abstract seam)
+
+Abstract principal service: request authentication plus the ambient binding every downstream consumer reads.
+
+The binding half is concrete here rather than left to providers, because two providers with two `AsyncLocalStorage` instances would each be invisible to the other's consumers — the store is the seam's identity, not an implementation choice. Providers implement authentication alone.
+
+```ts cordis-catalog
+/**
+ * Resolve the user behind one inbound request. Synchronous by contract: the
+ * carrier answers a request before any handler runs, so a provider keeps
+ * whatever it needs — a signed cookie's secret, a live session table — loaded
+ * ahead of time rather than reaching for it per request.
+ * @param request - inbound request headers, either carrier's representation.
+ * @returns the authenticated principal, or `undefined` when the request carries no valid identity.
+ */
+abstract authenticate(request: PrincipalRequest): Principal | undefined
+
+/**
+ * Bind `principal` to `fn` and everything it awaits, then restore the
+ * previous binding. Nesting is legal and the innermost binding wins.
+ * @param principal - the user to bind.
+ * @param fn - the region to run under that binding.
+ * @returns whatever `fn` returns.
+ */
+run<T>(principal: Principal, fn: () => T): T
+
+/**
+ * The principal bound to the current async region.
+ * @returns the bound principal, or `undefined` outside any {@link run} region.
+ */
+current(): Principal | undefined
+
+/**
+ * The principal bound to the current async region, or a refusal naming the
+ * consumer that needed one. Consumers whose behavior is undefined without a
+ * user call this instead of branching on {@link current}.
+ * @param consumer - the calling package or plugin name, for the diagnostic.
+ * @returns the bound principal.
+ * @throws PrincipalRequiredError when no principal is bound.
+ */
+require(consumer: string): Principal
+```
+
+Source: [`packages/identity/principal/src/index.ts`](../../packages/identity/principal/src/index.ts)
+
 <a id="authorization-events"></a>
 
 ### `authorization/*` events
