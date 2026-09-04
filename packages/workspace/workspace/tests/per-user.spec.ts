@@ -102,6 +102,31 @@ describe('workspaces created by a signed-in user', () => {
     expect(second.id).toBe(first.id)
   })
 
+  it('cannot be deleted by another user, and stays intact', async () => {
+    const ctx = await harness()
+    const created = await ctx.principal.run(alice, async () => await ctx.workspaceRegistry.create(await directory()))
+    expect(await ctx.principal.run(bob, async () => await ctx.workspaceRegistry.delete(created.id))).toBe(false)
+    expect(ctx.principal.run(alice, () => ctx.workspaceRegistry.get(created.id))?.id).toBe(created.id)
+  })
+
+  it('can be deleted by its own owner', async () => {
+    const ctx = await harness()
+    const created = await ctx.principal.run(alice, async () => await ctx.workspaceRegistry.create(await directory()))
+    expect(await ctx.principal.run(alice, async () => await ctx.workspaceRegistry.delete(created.id))).toBe(true)
+    expect(ctx.principal.run(alice, () => ctx.workspaceRegistry.get(created.id))).toBeUndefined()
+  })
+
+  it('cannot be reordered by another user, as either the moved workspace or the anchor', async () => {
+    const ctx = await harness()
+    const owned = await ctx.principal.run(alice, async () => await ctx.workspaceRegistry.create(await directory()))
+    const other = await ctx.principal.run(alice, async () => await ctx.workspaceRegistry.create(await directory()))
+    await expect(ctx.principal.run(bob, async () => await ctx.workspaceRegistry.insertBefore(owned.id)))
+      .rejects.toThrow()
+    const bobOwn = await ctx.principal.run(bob, async () => await ctx.workspaceRegistry.create(await directory()))
+    await expect(ctx.principal.run(bob, async () => await ctx.workspaceRegistry.insertBefore(bobOwn.id, other.id)))
+      .rejects.toThrow()
+  })
+
   it('survive a restart, still separated by owner', async () => {
     const pool = new MemoryMediaPool()
     const first = await harness(pool)

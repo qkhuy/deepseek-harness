@@ -20,14 +20,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { LiteLlmClient, LiteLlmRequestError } from '@deepseek-ai/dsh-litellm-client'
+import { LiteLlmClient, LiteLlmRequestError, resolveLiteLlmBaseUrl } from '@deepseek-ai/dsh-litellm-client'
 import type { LiteLlmKeyIdentity } from '@deepseek-ai/dsh-litellm-client'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import type { LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { PrincipalService } from '@deepseek-ai/dsh-principal'
 import type { Principal, PrincipalRequest } from '@deepseek-ai/dsh-principal'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { BodyRejected, readCredentials, requestStyle, safeReturnPath, writeHtml, writeJson, writeRedirect } from './http.ts'
+import {
+  BodyRejected, isSameSiteRequest, readCredentials, requestStyle, safeReturnPath, writeHtml, writeJson, writeRedirect,
+} from './http.ts'
 import { renderLoginPage } from './login-page.ts'
 import { principalIdForLiteLlmUser } from './principal-id.ts'
 import { LiteLlmSessionStore, readCookie, sessionCookie } from './session.ts'
@@ -52,8 +54,6 @@ export const LOGOUT_PATH = '/auth/litellm/logout'
 export const SESSION_PATH = '/auth/litellm/session'
 
 const MINUTE_MS = 60 * 1000
-/** Environment name carrying the proxy endpoint; a deployment fact, not a user preference. */
-export const BASE_URL_ENV = 'LITELLM_BASE_URL'
 
 /**
  * Plugin config. Every deployment-varying choice is here: the proxy to
@@ -198,19 +198,20 @@ function signInRefusal(error: unknown): { status: number; message: string } {
 
 /**
  * Resolve the proxy endpoint: the configured value, else `$LITELLM_BASE_URL`
- * from a trusted environment layer. The one explicit resolve step from raw
- * config to a usable endpoint.
+ * from a trusted environment layer (the shared resolution rule lives in
+ * `dsh-litellm-client`, alongside `dsh-llm-litellm`'s identical need). The
+ * one explicit resolve step from raw config to a usable endpoint.
  * @param config - raw plugin config.
  * @param environment - this run's environment layers, or `undefined` outside the product CLI.
  * @returns the resolved endpoint.
  * @throws Error when neither source names one.
  */
 export function resolveBaseUrl(config: Config, environment?: LaunchEnvironmentSnapshot): string {
-  const baseURL = config.baseURL ?? environment?.get(BASE_URL_ENV)?.value
-  if (baseURL === undefined || baseURL.trim().length === 0) {
+  const baseURL = resolveLiteLlmBaseUrl(config.baseURL, environment)
+  if (baseURL === undefined) {
     throw new Error(
       'litellm-auth: no proxy endpoint to authenticate against; set this row\'s baseURL, or export'
-      + ` ${BASE_URL_ENV} in the launching environment`,
+      + ' LITELLM_BASE_URL in the launching environment',
     )
   }
   return baseURL
@@ -257,6 +258,12 @@ export function apply(ctx: Context, config: Config): void {
 
     signIn: async (req, res) => {
       const style = requestStyle(req)
+      if (!isSameSiteRequest(req)) {
+        const message = 'Cross-site sign-in requests are refused.'
+        if (style === 'json') writeJson(res, 403, { error: message })
+        else writeHtml(res, 403, renderLoginPage({ action: LOGIN_PATH, next: '/', error: message }))
+        return
+      }
       let submitted: { apiKey?: string; next?: string }
       try {
         submitted = await readCredentials(req, style)
@@ -310,6 +317,11 @@ export function apply(ctx: Context, config: Config): void {
     },
 
     signOut: (req, res) => {
+      if (!isSameSiteRequest(req)) {
+        res.writeHead(403, { 'cache-control': 'no-store' })
+        res.end()
+        return
+      }
       const token = readCookie(req.headers.cookie, resolved.cookieName)
       if (token !== undefined) sessions.destroy(token)
       const cleared = sessionCookie(resolved.cookieName, '', 0, resolved.secureCookie)

@@ -27,6 +27,38 @@ export function requestStyle(request: IncomingMessage): RequestStyle {
   return contentType.includes('application/json') ? 'json' : 'form'
 }
 
+/**
+ * Whether one state-changing request (sign-in, sign-out) may have been
+ * coerced from a cross-site page rather than sent by the caller it claims to
+ * act as — the login-CSRF threat: a foreign page auto-submitting a form here
+ * would open a session under a key the visitor never typed and never chose
+ * to use, silently attributing their work and spend to it.
+ *
+ * A browser marks the initiator relationship on every fetch and form
+ * navigation; where that marker is present it is authoritative and a
+ * `cross-site` value is refused outright. Where it is absent — an older
+ * browser, or a non-browser client such as the programmatic JSON caller this
+ * route also serves — `Origin` decides: present, it must name this request's
+ * own Host; absent entirely, the request is accepted, because CSRF is a
+ * browser-coerced-request attack and a client sending neither marker is not
+ * a browser a page could have coerced.
+ * @param request - the inbound request.
+ * @returns true when the request is same-site or carries no browser marker at all.
+ */
+export function isSameSiteRequest(request: IncomingMessage): boolean {
+  const secFetchSite = request.headers['sec-fetch-site']
+  if (typeof secFetchSite === 'string') return secFetchSite !== 'cross-site'
+  const origin = request.headers.origin
+  if (typeof origin !== 'string') return true
+  const host = request.headers.host
+  if (typeof host !== 'string') return false
+  try {
+    return new URL(origin).host === new URL(`http://${host}`).host
+  } catch {
+    return false
+  }
+}
+
 /** A body was refused before parsing; `status` is what the route must answer. */
 export class BodyRejected extends Error {
   /**

@@ -12,6 +12,7 @@
  * @module @deepseek-ai/dsh-litellm-client
  */
 
+import type { LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { classifyLiteLlmFailure } from './failure.ts'
 import type { LiteLlmFailure } from './failure.ts'
 import type { LiteLlmKeyIdentity, LiteLlmModel } from './types.ts'
@@ -19,6 +20,37 @@ import type { LiteLlmKeyIdentity, LiteLlmModel } from './types.ts'
 export { classifyLiteLlmFailure, liteLlmErrorMessage, retryAfterMs } from './failure.ts'
 export type { LiteLlmFailure, LiteLlmFailureCode } from './failure.ts'
 export type { LiteLlmKeyIdentity, LiteLlmModel } from './types.ts'
+
+/**
+ * Environment name carrying the proxy endpoint when no plugin config names
+ * one. A deployment fact, not a user preference, so it is read from the
+ * launch environment rather than settings.
+ */
+export const LITELLM_BASE_URL_ENV = 'LITELLM_BASE_URL'
+
+/**
+ * Resolve the proxy endpoint two callers share: the configured value, else
+ * `$LITELLM_BASE_URL` from a trusted environment layer. The one explicit
+ * resolve step from raw config to a usable endpoint — kept here, not
+ * duplicated in each mounting plugin, because a future change to the
+ * resolution rule (another fallback source, trimming, …) must not drift
+ * between them.
+ *
+ * Deliberately returns `undefined` rather than throwing: each caller states
+ * its own missing-endpoint diagnostic in its own error vocabulary (an
+ * `LlmError` for the model route, a plain `Error` for the auth plugin), and
+ * this function does not own either.
+ * @param configuredBaseUrl - the plugin's own `baseURL` config field, verbatim.
+ * @param environment - this run's environment layers, or `undefined` outside the product CLI.
+ * @returns the resolved endpoint, or `undefined` when neither source names one.
+ */
+export function resolveLiteLlmBaseUrl(
+  configuredBaseUrl: string | undefined,
+  environment?: LaunchEnvironmentSnapshot,
+): string | undefined {
+  const baseURL = configuredBaseUrl ?? environment?.get(LITELLM_BASE_URL_ENV)?.value
+  return baseURL === undefined || baseURL.trim().length === 0 ? undefined : baseURL
+}
 
 /** A proxy call failed; `failure` carries the classification callers route on. */
 export class LiteLlmRequestError extends Error {

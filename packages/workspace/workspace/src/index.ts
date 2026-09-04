@@ -195,17 +195,26 @@ export class WorkspaceRegistry extends Service {
    * Delete one workspace registration while retaining its directory and every
    * session log. The durable order is updated before the table deletion; a
    * failed table write restores the prior order and keeps the entity
-   * published. Unknown ids are an idempotent no-op for domain callers.
+   * published. Unknown ids are an idempotent no-op for domain callers, and a
+   * workspace another principal owns is treated the same as unknown: a
+   * caller that cannot see a workspace must not be able to remove it either.
    * @param id - Workspace registration to remove.
-   * @returns `true` when a record was deleted, `false` when it was unknown.
+   * @returns `true` when a record was deleted, `false` when it was unknown or not owned by the caller.
    */
   delete(id: WorkspaceId): Promise<boolean> {
-    return this.enqueueOperation(() => this.deleteKnown(id))
+    return this.enqueueOperation(async () => {
+      const entity = this.entities.get(id)
+      if (entity === undefined || !this.visible(entity)) return false
+      return await this.deleteKnown(id, entity)
+    })
   }
 
   /**
    * Move one workspace within the durable display order, DOM-insertBefore-like.
-   * With an anchor it lands before that workspace; without one it appends.
+   * With an anchor it lands before that workspace; without one it appends. A
+   * workspace or anchor another principal owns is rejected the same as an
+   * unknown id, so a caller can neither move nor anchor against a workspace
+   * it cannot see.
    * @param id - Workspace to move.
    * @param beforeId - Workspace anchor; omitted appends.
    * @returns the complete committed workspace order.
@@ -213,9 +222,15 @@ export class WorkspaceRegistry extends Service {
   insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly WorkspaceId[]> {
     return this.enqueueOperation(async () => {
       const state = this.requireState()
-      if (!state.workspaceIds.includes(id)) throw new WorkspaceOrderInvalidError(id)
-      if (beforeId !== undefined && !state.workspaceIds.includes(beforeId)) {
-        throw new WorkspaceOrderInvalidError(beforeId)
+      const entity = this.entities.get(id)
+      if (!state.workspaceIds.includes(id) || entity === undefined || !this.visible(entity)) {
+        throw new WorkspaceOrderInvalidError(id)
+      }
+      if (beforeId !== undefined) {
+        const anchor = this.entities.get(beforeId)
+        if (!state.workspaceIds.includes(beforeId) || anchor === undefined || !this.visible(anchor)) {
+          throw new WorkspaceOrderInvalidError(beforeId)
+        }
       }
       if (beforeId === id) return state.workspaceIds
       const without = state.workspaceIds.filter(workspaceId => workspaceId !== id)
@@ -391,9 +406,7 @@ export class WorkspaceRegistry extends Service {
     return entity
   }
 
-  private async deleteKnown(id: WorkspaceId): Promise<boolean> {
-    const entity = this.entities.get(id)
-    if (entity === undefined) return false
+  private async deleteKnown(id: WorkspaceId, entity: WorkspaceEntity): Promise<boolean> {
     const state = this.requireState()
     const nextState = {
       initialized: true,

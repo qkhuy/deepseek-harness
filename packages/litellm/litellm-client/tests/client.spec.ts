@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import {
   LiteLlmClient,
   LiteLlmRequestError,
@@ -6,6 +7,7 @@ import {
   liteLlmChatCompletionsUrl,
   parseKeyIdentity,
   parseModelCatalog,
+  resolveLiteLlmBaseUrl,
 } from '../src/index.ts'
 import { requestUrl } from './request-url.ts'
 
@@ -263,5 +265,34 @@ describe('LiteLlmClient endpoints', () => {
     const controller = new AbortController()
     await client(scripted.fetch).verifyKey('sk-x', controller.signal)
     expect(scripted.calls).toHaveLength(1)
+  })
+})
+
+describe('resolveLiteLlmBaseUrl', () => {
+  it('prefers the configured value over the environment', () => {
+    const environment = createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { LITELLM_BASE_URL: 'https://env.example' } },
+    ])
+    expect(resolveLiteLlmBaseUrl('https://configured.example', environment)).toBe('https://configured.example')
+  })
+
+  it('falls back to $LITELLM_BASE_URL when nothing is configured', () => {
+    const environment = createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { LITELLM_BASE_URL: 'https://env.example' } },
+    ])
+    expect(resolveLiteLlmBaseUrl(undefined, environment)).toBe('https://env.example')
+  })
+
+  it('returns undefined when neither source names an endpoint', () => {
+    const environment = createLaunchEnvironmentSnapshot([{ source: 'process', values: {} }])
+    expect(resolveLiteLlmBaseUrl(undefined, environment)).toBeUndefined()
+    expect(resolveLiteLlmBaseUrl(undefined)).toBeUndefined()
+  })
+
+  it('treats a blank configured value as no endpoint, without falling back to the environment', () => {
+    const environment = createLaunchEnvironmentSnapshot([
+      { source: 'process', values: { LITELLM_BASE_URL: 'https://env.example' } },
+    ])
+    expect(resolveLiteLlmBaseUrl('   ', environment)).toBeUndefined()
   })
 })

@@ -146,6 +146,50 @@ describe('signing in with a virtual key', () => {
     expect((await signIn(port, 'sk-nameless')).status).toBe(403)
   })
 
+  it('refuses a cross-site submission and mints no session — the login-CSRF attack', async () => {
+    // Simulates an attacker page auto-submitting a real cross-origin form post
+    // with the attacker's own valid key: a browser marks that navigation
+    // cross-site, and the server must refuse it before it ever opens a
+    // session in the victim's browser.
+    scriptProxy({ 'sk-attacker': { user_id: 'attacker', models: [] } })
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'cross-site' },
+      body: new URLSearchParams({ apiKey: 'sk-attacker', next: '/' }),
+      redirect: 'manual',
+    })
+    expect(response.status).toBe(403)
+    expect(response.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('refuses a cross-site JSON submission with a JSON error body', async () => {
+    scriptProxy({ 'sk-attacker': { user_id: 'attacker', models: [] } })
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'sec-fetch-site': 'cross-site' },
+      body: JSON.stringify({ apiKey: 'sk-attacker', next: '/' }),
+      redirect: 'manual',
+    })
+    expect(response.status).toBe(403)
+    expect(response.headers.get('set-cookie')).toBeNull()
+    expect(await response.json()).toEqual({ error: 'Cross-site sign-in requests are refused.' })
+  })
+
+  it('refuses a submission whose Origin does not name this server', async () => {
+    scriptProxy({ 'sk-attacker': { user_id: 'attacker', models: [] } })
+    const port = await boot()
+    const response = await fetch(url(port, LOGIN_PATH), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'origin': 'https://evil.example' },
+      body: new URLSearchParams({ apiKey: 'sk-attacker', next: '/' }),
+      redirect: 'manual',
+    })
+    expect(response.status).toBe(403)
+    expect(response.headers.get('set-cookie')).toBeNull()
+  })
+
   it('refuses a submission naming no apiKey field at all', async () => {
     scriptProxy({})
     const port = await boot()
@@ -316,6 +360,17 @@ describe('signing out', () => {
     const port = await boot()
     const out = await fetch(url(port, LOGOUT_PATH), { method: 'POST', redirect: 'manual' })
     expect(out.status).toBe(303)
+  })
+
+  it('refuses a cross-site logout attempt, leaving the session live', async () => {
+    scriptProxy({ 'sk-alice': { user_id: 'alice', models: [] } })
+    const port = await boot()
+    const cookie = cookieOf(await signIn(port, 'sk-alice'))
+    const out = await fetch(url(port, LOGOUT_PATH), {
+      method: 'POST', headers: { cookie, 'sec-fetch-site': 'cross-site' }, redirect: 'manual',
+    })
+    expect(out.status).toBe(403)
+    expect((await fetch(url(port, SESSION_PATH), { headers: { cookie } })).status).toBe(200)
   })
 })
 

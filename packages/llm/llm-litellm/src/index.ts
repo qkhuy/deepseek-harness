@@ -21,7 +21,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { LlmError, assertUsableApiKey, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
-import { LiteLlmClient, LiteLlmRequestError } from '@deepseek-ai/dsh-litellm-client'
+import { LiteLlmClient, LiteLlmRequestError, resolveLiteLlmBaseUrl } from '@deepseek-ai/dsh-litellm-client'
 import type { LiteLlmModel } from '@deepseek-ai/dsh-litellm-client'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
@@ -48,8 +48,6 @@ export const PROVIDER = 'litellm'
 export const SETTINGS_NS = 'llm-litellm'
 /** Credential reference used when no signed-in user owns the request. */
 const DEFAULT_API_KEY_ENV = 'LITELLM_API_KEY'
-/** Environment name carrying the proxy endpoint; a deployment fact, not a user preference. */
-export const BASE_URL_ENV = 'LITELLM_BASE_URL'
 
 /**
  * Plugin config. `apiKeyEnv` is deliberately not the primary credential: it
@@ -146,20 +144,22 @@ class CatalogCache {
 
 /**
  * Resolve the proxy endpoint: the configured value, else `$LITELLM_BASE_URL`
- * from a trusted environment layer. The one explicit resolve step from raw
- * config to a usable endpoint, so both the composition entry at load (fail
- * loud) and a future settings snapshot re-judge it the same way.
+ * from a trusted environment layer (the shared resolution rule lives in
+ * `dsh-litellm-client`, alongside `dsh-litellm-auth`'s identical need). The
+ * one explicit resolve step from raw config to a usable endpoint, so both the
+ * composition entry at load (fail loud) and a future settings snapshot
+ * re-judge it the same way.
  * @param config - raw plugin config.
  * @param environment - this run's environment layers, or `undefined` outside the product CLI.
  * @returns the resolved endpoint.
  * @throws LlmError with code `INVALID_CONFIG` when neither source names one.
  */
 export function resolveBaseUrl(config: Config, environment?: LaunchEnvironmentSnapshot): string {
-  const baseURL = config.baseURL ?? environment?.get(BASE_URL_ENV)?.value
-  if (baseURL === undefined || baseURL.trim().length === 0) {
+  const baseURL = resolveLiteLlmBaseUrl(config.baseURL, environment)
+  if (baseURL === undefined) {
     throw new LlmError(
       `llm-litellm: no proxy endpoint for provider route "${PROVIDER}"; set this row's baseURL, or export`
-      + ` ${BASE_URL_ENV} in the launching environment`,
+      + ' LITELLM_BASE_URL in the launching environment',
       'INVALID_CONFIG',
     )
   }

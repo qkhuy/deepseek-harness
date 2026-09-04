@@ -4,7 +4,9 @@ import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { BodyRejected, readCredentials, requestStyle, writeHtml, writeJson, writeRedirect } from '../src/http.ts'
+import {
+  BodyRejected, isSameSiteRequest, readCredentials, requestStyle, writeHtml, writeJson, writeRedirect,
+} from '../src/http.ts'
 
 function fakeRequest(body: string, headers: Record<string, string> = {}): IncomingMessage {
   const request = Readable.from([Buffer.from(body)]) as unknown as IncomingMessage
@@ -124,5 +126,43 @@ describe('writeRedirect', () => {
     const { response, state } = fakeResponse()
     writeRedirect(response, '/w/1', 'session=abc')
     expect(state.headers?.['set-cookie']).toBe('session=abc')
+  })
+})
+
+describe('isSameSiteRequest', () => {
+  it('refuses a request a modern browser marks cross-site, regardless of Origin', () => {
+    expect(isSameSiteRequest(fakeRequest('', { 'sec-fetch-site': 'cross-site' }))).toBe(false)
+    expect(isSameSiteRequest(fakeRequest('', {
+      'sec-fetch-site': 'cross-site', 'origin': 'https://harness.example', 'host': 'harness.example',
+    }))).toBe(false)
+  })
+
+  it('accepts same-origin and none, the two values a genuine sign-in submission carries', () => {
+    expect(isSameSiteRequest(fakeRequest('', { 'sec-fetch-site': 'same-origin' }))).toBe(true)
+    expect(isSameSiteRequest(fakeRequest('', { 'sec-fetch-site': 'none' }))).toBe(true)
+  })
+
+  it('falls back to Origin when no Fetch-Metadata marker is attached', () => {
+    expect(isSameSiteRequest(fakeRequest('', { origin: 'https://harness.example', host: 'harness.example' })))
+      .toBe(true)
+    expect(isSameSiteRequest(fakeRequest('', { origin: 'https://evil.example', host: 'harness.example' })))
+      .toBe(false)
+  })
+
+  it('refuses a cross-origin Origin even against a differently-cased or ported Host', () => {
+    expect(isSameSiteRequest(fakeRequest('', { origin: 'https://harness.example:8080', host: 'harness.example' })))
+      .toBe(false)
+  })
+
+  it('refuses an Origin the server cannot compare against, for want of a Host header', () => {
+    expect(isSameSiteRequest(fakeRequest('', { origin: 'https://harness.example' }))).toBe(false)
+  })
+
+  it('refuses an unparsable Origin rather than treating it as same-site', () => {
+    expect(isSameSiteRequest(fakeRequest('', { origin: 'not a url', host: 'harness.example' }))).toBe(false)
+  })
+
+  it('accepts a request with neither marker, the shape a non-browser client sends', () => {
+    expect(isSameSiteRequest(fakeRequest('', {}))).toBe(true)
   })
 })
